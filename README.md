@@ -93,15 +93,89 @@ Without that, trust tiers are theatre.
 
 ## Status
 
-Prototype, under active construction. Not ready for anyone's real work yet.
+Working prototype. Two real Claude processes have held a real conversation. Not ready for anyone's
+production work, and the gaps below are honest.
 
 | Phase | What | State |
 |---|---|---|
-| 1 | Envelopes, relay, two identities talking | in progress |
-| 2 | Pairing, tier 2, escaper, offline queue | in progress |
-| 3 | Ledger, convergence detectors, `DECISION.md` | in progress |
-| 4 | Tier 3 worktrees and staged diffs | not started |
+| 1 | Envelopes, relay, two identities talking | **done** |
+| 2 | Pairing, safety words, tier 2, escaper, offline queue | **done** |
+| 3 | Ledger, convergence detectors, `DECISION.md` | **done** |
+| 4 | Tier 3 worktrees and staged diffs | scaffolded, not exercised |
 | 5 | Tier 4 | see the table above |
+
+229 tests. Typecheck clean. Node 24 runs the TypeScript directly, so there is no build step.
+
+### What a real run looks like
+
+Two independent identities, two `claude -p` processes, one relay, arguing about mesh formats:
+
+```
+jake  BRIEF      Agreeing one handoff format: triangle meshes, millimetres, no Blender
+dave  BRIEF      My half consumes quad meshes in metres. Edge flow must survive.
+jake  EVIDENCE   glTF 2.0 cannot carry quads at all, which narrows the container.
+dave  COUNTER    You're right on glTF, no quad primitive, I was wrong.
+jake  COUNTER    Yes to ordered polylines as LINE_STRIP. Conceding metres.
+dave  RED_TEAM   Before I sign, breaking this deal on purpose: confidence may be
+                 uncalibrated, curves are weakest where I need them most.
+```
+
+Two things in that transcript are the product working rather than a model being clever. Dave's agent
+**refused to grant its human's non-negotiable and escalated instead**, which is the protocol's one
+hard rule. And it **red-teamed the deal it was about to sign**, which is the anti-sycophancy
+machinery. Neither was prompted for in that turn.
+
+The detector then fired `looping`, because the two agents negotiated in prose without ever updating
+the ledger, so `DECISION.md` correctly says *"No issue reached agreement. This is an open-issues
+list, not a decision."* It would have been easy to call that a success. It isn't one, and seshi says
+so.
+
+### Known gaps, stated plainly
+
+- **Agents under-use the ledger.** They argue well in prose and forget to move issues, so
+  convergence detection is starved. The protocol asks for it; the models mostly do not comply. This
+  is the biggest open problem and it is a prompt-and-protocol problem, not a plumbing one.
+- **The relay's `hello` is unauthenticated.** A client asserts its own fingerprint. It cannot read
+  anyone's mail (that needs the private key) and cannot forge a frame (signatures are verified at
+  the receiver), but it could squat a fingerprint and swallow queued frames. Fix is a signed
+  challenge at connect.
+- **Pairing is a public-key bundle, not a spoken code.** Safety words are the real MITM defence, as
+  in Signal and SSH. A short three-word code backed by a PAKE is a UX improvement over this, and is
+  phase 2 proper.
+- **Tier 3 is generated but not exercised.** The worktree and staged-diff path has no test.
+- **No outbound secret scanning yet.** Tiers 2 and 3 deny `Bash` and deny reads of `.env`, `~/.ssh`,
+  `~/.aws` and friends, so the residual risk is an agent paraphrasing something confidential it
+  legitimately read. That hole is real and documented rather than papered over.
+
+## Quickstart
+
+Three terminals, one machine, to see it work:
+
+```bash
+npm install
+
+# terminal 1 — the relay
+node packages/cli/src/index.ts relay 8787
+
+# terminal 2 — you
+export SESHI_RELAY=ws://127.0.0.1:8787 SESHI_HOME=~/.seshi-jake SESHI_NAME=jake
+node packages/cli/src/index.ts init
+node packages/cli/src/index.ts invite        # copy the seshi1_... line
+
+# terminal 3 — them
+export SESHI_RELAY=ws://127.0.0.1:8787 SESHI_HOME=~/.seshi-dave SESHI_NAME=dave
+node packages/cli/src/index.ts init
+node packages/cli/src/index.ts pair seshi1_...   # prints four safety words
+```
+
+Both sides must see the same four words. Then `seshi verify <name>`, `seshi tier <name> 2`, and
+`seshi talk <name> decide "the thing you disagree about"`.
+
+To run the two-real-models test:
+
+```bash
+SESHI_LIVE=1 node --test test/e2e/live-conversation.test.ts
+```
 
 ## Design
 
