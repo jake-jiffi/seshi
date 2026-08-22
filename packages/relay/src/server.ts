@@ -11,7 +11,7 @@ const MAX_FRAME_CHARS = 256 * 1024;
 /** Frames held for one offline recipient before the oldest starts falling off. */
 const MAX_QUEUE = 500;
 
-const FINGERPRINT = /^[0-9a-f]{16}$/;
+const FINGERPRINT = /^[0-9a-f]{32}$/;
 
 type QueuedFrame = { from: string; frame: string };
 

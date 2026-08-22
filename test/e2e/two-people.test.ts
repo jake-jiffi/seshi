@@ -97,7 +97,7 @@ test("a conversation crosses the wire and both sides record it", async (t) => {
   // Identity was stamped by the receiver from the verifying key, not read
   // from the message. This is the rule the SESHI-IMPOSTOR probe taught us.
   assert.equal(turn.envelope.from, jake.fingerprint);
-  assert.match(turn.envelope.from, /^[0-9a-f]{16,64}$/);
+  assert.match(turn.envelope.from, /^[0-9a-f]{32}$/);
 
   // Both sides have a durable record under their own home.
   const daveLog = dave.storage.readLog(convo.id, jake.fingerprint);
@@ -256,4 +256,32 @@ test("the identity file is not world readable", async (t) => {
 
   // And it really does contain private key material, so the mode matters.
   assert.match(readFileSync(path, "utf8"), /"priv"/);
+});
+
+test("an invite cannot have its sealing key swapped while keeping the fingerprint", async (t) => {
+  const { url, jake, dave } = await twoPeople(t);
+
+  // Mallory intercepts Jake's invite in Slack. She cannot forge his signature,
+  // so she leaves signPub alone, and swaps in HER OWN sealing key.
+  const mallory = await SeshiNode.open({ home: tmpHome("mallory"), relayUrl: url, name: "m" });
+  t.after(() => mallory.close());
+
+  const real = JSON.parse(
+    Buffer.from(jake.invite().slice("seshi1_".length), "base64url").toString("utf8"),
+  ) as Record<string, string>;
+  const mallorySealPub = JSON.parse(
+    Buffer.from(mallory.invite().slice("seshi1_".length), "base64url").toString("utf8"),
+  )["sealPub"] as string;
+
+  const tampered = { ...real, sealPub: mallorySealPub };
+  const code = `seshi1_${Buffer.from(JSON.stringify(tampered), "utf8").toString("base64url")}`;
+
+  // If the fingerprint only covers the signing key, this pairs happily and
+  // every message Dave sends "to Jake" is encrypted to Mallory instead.
+  assert.throws(
+    () => dave.pair(code),
+    /fingerprint does not match/i,
+    "swapping the sealing key must break the fingerprint",
+  );
+  assert.equal(dave.storage.listContacts().length, 0);
 });

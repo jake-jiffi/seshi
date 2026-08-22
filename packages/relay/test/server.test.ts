@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { startRelay } from "../src/server.ts";
 
-const FP_A = "aaaaaaaaaaaaaaaa";
-const FP_B = "bbbbbbbbbbbbbbbb";
-const FP_C = "cccccccccccccccc";
+const FP_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const FP_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const FP_C = "cccccccccccccccccccccccccccccccc";
 
 const MAX_FRAME = 256 * 1024;
 

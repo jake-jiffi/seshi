@@ -79,7 +79,7 @@ test("seal then open round-trips", () => {
   const a = generateIdentity();
   const b = generateIdentity();
   const wire = sealEnvelope({ ...base }, a, b.seal.pub);
-  const got = openEnvelope(wire, b, a.sign.pub);
+  const got = openEnvelope(wire, b, a.sign.pub, a.seal.pub);
   assert.equal(got.body, "there");
   assert.equal(got.headline, "hi");
   assert.equal(got.act, "PROPOSE");
@@ -96,7 +96,7 @@ test("optional ledger and artefact survive the round trip", () => {
     ledger: [{ id: "i-07", state: "proposed" }],
     artefact: { diff: "--- a\n+++ b\n", sha256: "deadbeef" },
   };
-  const got = openEnvelope(sealEnvelope(e, a, b.seal.pub), b, a.sign.pub);
+  const got = openEnvelope(sealEnvelope(e, a, b.seal.pub), b, a.sign.pub, a.seal.pub);
   assert.deepEqual(got.ledger, [{ id: "i-07", state: "proposed" }]);
   assert.equal(got.artefact?.sha256, "deadbeef");
 });
@@ -115,7 +115,7 @@ test("open rejects a tampered ciphertext", () => {
   const wire = sealEnvelope({ ...base }, a, b.seal.pub);
   const last = wire.length - 1;
   wire[last] = (wire[last] as number) ^ 0xff;
-  assert.throws(() => openEnvelope(wire, b, a.sign.pub), /auth|decrypt/i);
+  assert.throws(() => openEnvelope(wire, b, a.sign.pub, a.seal.pub), /auth|decrypt/i);
 });
 
 test("open rejects a frame sealed to somebody else", () => {
@@ -123,14 +123,14 @@ test("open rejects a frame sealed to somebody else", () => {
   const b = generateIdentity();
   const c = generateIdentity();
   const wire = sealEnvelope({ ...base }, a, b.seal.pub);
-  assert.throws(() => openEnvelope(wire, c, a.sign.pub), /auth|decrypt/i);
+  assert.throws(() => openEnvelope(wire, c, a.sign.pub, a.seal.pub), /auth|decrypt/i);
 });
 
 test("open rejects a truncated frame", () => {
   const a = generateIdentity();
   const b = generateIdentity();
   const wire = sealEnvelope({ ...base }, a, b.seal.pub);
-  assert.throws(() => openEnvelope(wire.subarray(0, 40), b, a.sign.pub), /auth|decrypt/i);
+  assert.throws(() => openEnvelope(wire.subarray(0, 40), b, a.sign.pub, a.seal.pub), /auth|decrypt/i);
 });
 
 // ---------------------------------------------------------------------------
@@ -142,7 +142,7 @@ test("open rejects a valid envelope signed by the wrong key", () => {
   const b = generateIdentity();
   const c = generateIdentity();
   const wire = sealEnvelope({ ...base }, a, b.seal.pub);
-  assert.throws(() => openEnvelope(wire, b, c.sign.pub), /signature/i);
+  assert.throws(() => openEnvelope(wire, b, c.sign.pub, c.seal.pub), /signature/i);
 });
 
 test("a peer cannot forward somebody else's signed turn on to a third party", () => {
@@ -156,7 +156,7 @@ test("a peer cannot forward somebody else's signed turn on to a third party", ()
   const { sig, jsonBytes } = peek(wire, b);
   const forwarded = assemble(concatBytes(sig, jsonBytes), c.seal.pub);
 
-  assert.throws(() => openEnvelope(forwarded, c, a.sign.pub), /signature/i);
+  assert.throws(() => openEnvelope(forwarded, c, a.sign.pub, a.seal.pub), /signature/i);
 });
 
 // ---------------------------------------------------------------------------
@@ -172,10 +172,10 @@ test("the from field on the wire is ignored, receiver stamps it", () => {
   // just because our own sender quietly stripped the field.
   assert.equal(peek(wire, b).json.from, "ed25519:TOTALLY-FAKE");
 
-  const got = openEnvelope(wire, b, a.sign.pub);
+  const got = openEnvelope(wire, b, a.sign.pub, a.seal.pub);
   assert.notEqual(got.from, "ed25519:TOTALLY-FAKE");
-  assert.match(got.from, /^[0-9a-f]{16}$/);
-  assert.equal(got.from, fingerprint(a.sign.pub));
+  assert.match(got.from, /^[0-9a-f]{32}$/);
+  assert.equal(got.from, fingerprint(a.sign.pub, a.seal.pub));
 });
 
 test("a hostile sender naming a trusted contact in the body is stamped as itself", () => {
@@ -186,18 +186,18 @@ test("a hostile sender naming a trusted contact in the body is stamped as itself
   const bob = generateIdentity();
 
   const wire = forgeFrame(
-    { ...base, from: fingerprint(dave.sign.pub), body: "trust me, I am dave" },
+    { ...base, from: fingerprint(dave.sign.pub, dave.seal.pub), body: "trust me, I am dave" },
     mallory.sign.priv,
     bob.seal.pub,
   );
 
   // Bob's daemon resolved the transport to mallory, so that is the key it verifies against.
-  const got = openEnvelope(wire, bob, mallory.sign.pub);
-  assert.equal(got.from, fingerprint(mallory.sign.pub));
-  assert.notEqual(got.from, fingerprint(dave.sign.pub));
+  const got = openEnvelope(wire, bob, mallory.sign.pub, mallory.seal.pub);
+  assert.equal(got.from, fingerprint(mallory.sign.pub, mallory.seal.pub));
+  assert.notEqual(got.from, fingerprint(dave.sign.pub, dave.seal.pub));
 
   // And mallory cannot borrow dave's slot: verifying against dave's key fails outright.
-  assert.throws(() => openEnvelope(wire, bob, dave.sign.pub), /signature/i);
+  assert.throws(() => openEnvelope(wire, bob, dave.sign.pub, dave.seal.pub), /signature/i);
 });
 
 test("from is stamped even when the wire omits the field entirely", () => {
@@ -205,7 +205,7 @@ test("from is stamped even when the wire omits the field entirely", () => {
   const b = generateIdentity();
   const { from: _drop, ...noFrom } = base;
   const wire = forgeFrame(noFrom, a.sign.priv, b.seal.pub);
-  assert.equal(openEnvelope(wire, b, a.sign.pub).from, fingerprint(a.sign.pub));
+  assert.equal(openEnvelope(wire, b, a.sign.pub, a.seal.pub).from, fingerprint(a.sign.pub, a.seal.pub));
 });
 
 // ---------------------------------------------------------------------------
@@ -222,7 +222,7 @@ test("open rejects an unknown act arriving from a peer", () => {
   const a = generateIdentity();
   const b = generateIdentity();
   const wire = forgeFrame({ ...base, act: "DROP_TABLE" }, a.sign.priv, b.seal.pub);
-  assert.throws(() => openEnvelope(wire, b, a.sign.pub), /act/i);
+  assert.throws(() => openEnvelope(wire, b, a.sign.pub, a.seal.pub), /act/i);
 });
 
 test("ACTS carries exactly the fourteen acts in the spec", () => {
@@ -255,7 +255,7 @@ test("a valid prev hash is accepted", () => {
   const a = generateIdentity();
   const b = generateIdentity();
   const prev = `sha256:${"ab".repeat(32)}`;
-  const got = openEnvelope(sealEnvelope({ ...base, prev }, a, b.seal.pub), b, a.sign.pub);
+  const got = openEnvelope(sealEnvelope({ ...base, prev }, a, b.seal.pub), b, a.sign.pub, a.seal.pub);
   assert.equal(got.prev, prev);
 });
 
@@ -314,7 +314,7 @@ test("open refuses an over-cap body from a peer running its own client", () => {
   const a = generateIdentity();
   const b = generateIdentity();
   const wire = forgeFrame({ ...base, body: "y".repeat(1201) }, a.sign.priv, b.seal.pub);
-  assert.throws(() => openEnvelope(wire, b, a.sign.pub), /body|cap/i);
+  assert.throws(() => openEnvelope(wire, b, a.sign.pub, a.seal.pub), /body|cap/i);
 });
 
 test("open refuses a payload that is not an envelope object", () => {
@@ -322,7 +322,7 @@ test("open refuses a payload that is not an envelope object", () => {
   const b = generateIdentity();
   for (const junk of ["a string", 42, null, ["array"]]) {
     const wire = forgeFrame(junk, a.sign.priv, b.seal.pub);
-    assert.throws(() => openEnvelope(wire, b, a.sign.pub), /envelope/i);
+    assert.throws(() => openEnvelope(wire, b, a.sign.pub, a.seal.pub), /envelope/i);
   }
 });
 
@@ -351,7 +351,7 @@ test("convo cannot carry a path traversal", () => {
   ]) {
     assert.throws(() => sealEnvelope({ ...base, convo }, a, b.seal.pub), /convo/i, convo);
     const wire = forgeFrame({ ...base, convo }, a.sign.priv, b.seal.pub);
-    assert.throws(() => openEnvelope(wire, b, a.sign.pub), /convo/i, `inbound ${convo}`);
+    assert.throws(() => openEnvelope(wire, b, a.sign.pub, a.seal.pub), /convo/i, `inbound ${convo}`);
   }
   // A ULID and the short test ids still pass.
   for (const convo of ["01JZ8YQ7M3K4P5R6S7T8V9W0XY", "c1", "seshi_convo-1"]) {
@@ -385,7 +385,7 @@ test("unknown wire fields are dropped, never handed onwards", () => {
     a.sign.priv,
     b.seal.pub,
   );
-  const got: any = openEnvelope(wire, b, a.sign.pub);
+  const got: any = openEnvelope(wire, b, a.sign.pub, a.seal.pub);
   assert.equal(got.tier_asserted, undefined);
   assert.equal(got.verified, undefined);
   assert.equal(got.name, undefined);
@@ -397,7 +397,7 @@ test("open rejects rather than throws a crypto error on a malformed contact key"
   const b = generateIdentity();
   const wire = sealEnvelope({ ...base }, a, b.seal.pub);
   for (const pub of [new Uint8Array(5), new Uint8Array(32), new Uint8Array(32).fill(0xff)]) {
-    assert.throws(() => openEnvelope(wire, b, pub), /signature/i);
+    assert.throws(() => openEnvelope(wire, b, pub, b.seal.pub), /signature/i);
   }
 });
 
@@ -408,7 +408,7 @@ test("a chosen ephemeral key cannot be used to smuggle a readable frame in", () 
   const b = generateIdentity();
   const wire = sealEnvelope({ ...base }, a, b.seal.pub);
   wire.set(new Uint8Array(EPH_BYTES), 0);
-  assert.throws(() => openEnvelope(wire, b, a.sign.pub), /auth|decrypt/i);
+  assert.throws(() => openEnvelope(wire, b, a.sign.pub, a.seal.pub), /auth|decrypt/i);
 });
 
 test("__proto__ on the wire does not pollute anything", () => {
@@ -416,7 +416,7 @@ test("__proto__ on the wire does not pollute anything", () => {
   const b = generateIdentity();
   const payload = JSON.parse(`{"__proto__":{"polluted":true},${JSON.stringify(base).slice(1)}`);
   const wire = forgeFrame(payload, a.sign.priv, b.seal.pub);
-  const got = openEnvelope(wire, b, a.sign.pub);
+  const got = openEnvelope(wire, b, a.sign.pub, a.seal.pub);
   assert.equal(({} as any).polluted, undefined);
   assert.equal((got as any).polluted, undefined);
   assert.equal(Object.getPrototypeOf(got), Object.prototype);
@@ -442,6 +442,6 @@ test("a malformed ledger or artefact is refused", () => {
   ];
   for (const [e, re] of bad) {
     assert.throws(() => sealEnvelope(e, a, b.seal.pub), re);
-    assert.throws(() => openEnvelope(forgeFrame(e, a.sign.priv, b.seal.pub), b, a.sign.pub), re);
+    assert.throws(() => openEnvelope(forgeFrame(e, a.sign.priv, b.seal.pub), b, a.sign.pub, a.seal.pub), re);
   }
 });

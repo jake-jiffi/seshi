@@ -26,22 +26,23 @@ test("two identities are different", () => {
   assert.notDeepEqual(a.seal.priv, b.seal.priv);
 });
 
-test("fingerprint is stable, 16 hex chars", () => {
+test("fingerprint is stable, 32 hex chars", () => {
   const id = generateIdentity();
-  const f = fingerprint(id.sign.pub);
-  assert.match(f, /^[0-9a-f]{16}$/);
-  assert.equal(f, fingerprint(id.sign.pub));
+  const f = fingerprint(id.sign.pub, id.seal.pub);
+  assert.match(f, /^[0-9a-f]{32}$/);
+  assert.equal(f, fingerprint(id.sign.pub, id.seal.pub));
 });
 
 test("fingerprint differs for different keys", () => {
   const a = generateIdentity();
   const b = generateIdentity();
-  assert.notEqual(fingerprint(a.sign.pub), fingerprint(b.sign.pub));
+  assert.notEqual(fingerprint(a.sign.pub, a.seal.pub), fingerprint(b.sign.pub, b.seal.pub));
 });
 
 test("fingerprint rejects anything that is not a 32 byte key", () => {
-  assert.throws(() => fingerprint(new Uint8Array(31)), /32/);
-  assert.throws(() => fingerprint(new Uint8Array(33)), /32/);
+  assert.throws(() => fingerprint(new Uint8Array(31), new Uint8Array(32)), /32/);
+  assert.throws(() => fingerprint(new Uint8Array(33), new Uint8Array(32)), /32/);
+  assert.throws(() => fingerprint(new Uint8Array(32), new Uint8Array(31)), /32/);
 });
 
 test("safety words are deterministic and come from the wordlist", () => {

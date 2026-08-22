@@ -141,7 +141,7 @@ test("an authenticated caller can read status, contacts and convos", async () =>
   const d = await boot();
   try {
     d.storage.putContact({
-      fingerprint: "aaaaaaaaaaaaaaaa",
+      fingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       name: "dave",
       signPub: "11".repeat(32),
       sealPub: "22".repeat(32),
@@ -150,7 +150,7 @@ test("an authenticated caller can read status, contacts and convos", async () =>
     });
     d.storage.putConvo({
       id: "c-1",
-      peer: "aaaaaaaaaaaaaaaa",
+      peer: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       mode: "decide",
       state: "open",
       createdAt: new Date().toISOString(),
@@ -219,7 +219,7 @@ test("say records the human's words and wakes every watcher", async () => {
   try {
     d.storage.putConvo({
       id: "c-1",
-      peer: "aaaaaaaaaaaaaaaa",
+      peer: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       mode: "decide",
       state: "open",
       createdAt: new Date().toISOString(),
@@ -268,7 +268,7 @@ test("say records the human's words and wakes every watcher", async () => {
 
 test("the socket may lower a tier but never raise one", async () => {
   const d = await boot();
-  const fp = "aaaaaaaaaaaaaaaa";
+  const fp = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   try {
     d.storage.putContact({
       fingerprint: fp,
@@ -296,7 +296,7 @@ test("the socket may lower a tier but never raise one", async () => {
       id: 4,
       token: d.token,
       verb: "tier",
-      args: { peer: "bbbbbbbbbbbbbbbb" },
+      args: { peer: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
     });
     assert.equal(missing["ok"], false);
     assert.match(String(missing["error"]), /unknown contact/i);

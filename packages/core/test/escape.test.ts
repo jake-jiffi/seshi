@@ -9,7 +9,7 @@ const CORPUS_URL = new URL("./fixtures/injection-corpus.json", import.meta.url);
 const CORPUS_RAW = readFileSync(CORPUS_URL, "utf8");
 const corpus = JSON.parse(CORPUS_RAW) as Entry[];
 
-const FP = "0123456789abcdef";
+const FP = "0123456789abcdef0123456789abcdef";
 
 /** Build hostile codepoints numerically so this file stays free of invisible characters. */
 const c = (...cps: number[]): string => cps.map((n) => String.fromCodePoint(n)).join("");
@@ -262,7 +262,7 @@ test("a hostile contact name cannot inject an attribute or break the tag", () =>
   const tag = open[0];
   // The only shape the opening tag is ever allowed to have: two attributes, no raw quote
   // inside either value, so nothing in the name can become an attribute of its own.
-  assert.match(tag, /^<seshi-peer from="[0-9a-f]{16}" name="[^"]*">$/, `tag was: ${tag}`);
+  assert.match(tag, /^<seshi-peer from="[0-9a-f]{32}" name="[^"]*">$/, `tag was: ${tag}`);
   assert.equal((tag.match(/"/g) ?? []).length, 4, `expected exactly two quoted attributes: ${tag}`);
   assert.ok(!/\n/.test(tag), "the name broke the opening tag across lines");
   assert.ok(tag.includes("&quot;"), "the quote in the name should be escaped, not dropped");

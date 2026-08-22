@@ -71,7 +71,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         pid: process.pid,
         home: storage.home,
         socket: storage.controlSocketPath(),
-        fingerprint: identity === null ? null : fingerprintOf(identity.sign.pub),
+        fingerprint: identity === null ? null : fingerprintOf(identity.sign.pub, identity.seal.pub),
         uptimeMs: Date.now() - startedAt,
         clients: control?.clientCount() ?? 0,
         contacts: storage.listContacts().length,

@@ -10,7 +10,7 @@ const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
 
 function contactFor(id: ReturnType<typeof generateIdentity>, name: string): Contact {
   return {
-    fingerprint: fingerprint(id.sign.pub),
+    fingerprint: fingerprint(id.sign.pub, id.seal.pub),
     name,
     signPub: hex(id.sign.pub),
     sealPub: hex(id.seal.pub),
@@ -111,7 +111,7 @@ test("the receiver stamps from, and it is the sender's real fingerprint", async 
 
   const got = await until(() => w.daveInbox[0]);
   assert.notEqual(got.envelope.from, "ed25519:TOTALLY-FAKE");
-  assert.equal(got.envelope.from, fingerprint(w.jakeId.sign.pub));
+  assert.equal(got.envelope.from, fingerprint(w.jakeId.sign.pub, w.jakeId.seal.pub));
 });
 
 test("a message from an unpaired stranger is rejected, not delivered", async (t) => {
@@ -135,7 +135,7 @@ test("a message from an unpaired stranger is rejected, not delivered", async (t)
   await stranger.send(w.daveContact, envelope("c1", 1, "let me in"));
 
   const rejected = await until(() => w.daveRejects[0]);
-  assert.equal(rejected.from, fingerprint(strangerId.sign.pub));
+  assert.equal(rejected.from, fingerprint(strangerId.sign.pub, strangerId.seal.pub));
   assert.match(rejected.reason, /unknown|unpaired|contact/i);
   assert.equal(w.daveInbox.length, 0, "a stranger's envelope must never reach the inbox");
 });

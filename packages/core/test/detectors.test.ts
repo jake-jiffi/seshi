@@ -4,8 +4,8 @@ import type { Act, Envelope } from "../src/envelope.ts";
 import { Ledger } from "../src/ledger.ts";
 import { detect, positionFingerprint, CAPITULATION_LIMIT } from "../src/detectors.ts";
 
-const JAKE = "a".repeat(16);
-const DAVE = "b".repeat(16);
+const JAKE = "a".repeat(32);
+const DAVE = "b".repeat(32);
 
 let seq = 0;
 function turn(from: string, act: Act, headline: string, body = headline, extra: Partial<Envelope> = {}): Envelope {

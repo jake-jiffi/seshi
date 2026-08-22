@@ -35,7 +35,7 @@ import { Storage, type Contact, type ConvoRecord, type PublicBrief } from "./sto
 import { RelayClient } from "./relay-client.ts";
 
 /** Same shape storage enforces, because a fingerprint becomes a directory name. */
-const FINGERPRINT = /^[0-9a-f]{16}$/;
+const FINGERPRINT = /^[0-9a-f]{32}$/;
 
 const hex = (b: Uint8Array): string => Buffer.from(b).toString("hex");
 const unhex = (s: string): Uint8Array => Uint8Array.from(Buffer.from(s, "hex"));
@@ -101,7 +101,7 @@ export class SeshiNode {
   }
 
   get fingerprint(): string {
-    return fingerprint(this.identity.sign.pub);
+    return fingerprint(this.identity.sign.pub, this.identity.seal.pub);
   }
 
   get rejects(): ReadonlyArray<{ from: string; reason: string }> {
@@ -287,7 +287,7 @@ export function parseInvite(code: string): InviteBundle {
   }
   // The fingerprint is derived, never trusted: an invite that lies about its
   // own fingerprint is rejected here rather than becoming a mislabelled contact.
-  if (fingerprint(unhex(bundle.signPub)) !== bundle.fp) {
+  if (fingerprint(unhex(bundle.signPub), unhex(bundle.sealPub)) !== bundle.fp) {
     throw new Error("invite fingerprint does not match its signing key");
   }
   return bundle;

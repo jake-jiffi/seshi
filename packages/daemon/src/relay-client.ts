@@ -160,6 +160,7 @@ export class RelayClient {
         Uint8Array.from(Buffer.from(frame, "base64")),
         this.#opts.identity,
         hexToBytes(contact.signPub),
+        hexToBytes(contact.sealPub),
       );
     } catch (err) {
       this.#reject(claimedFrom, `could not open frame: ${(err as Error).message}`);
@@ -196,7 +197,7 @@ export class RelayClient {
 function fingerprintOfIdentity(id: Identity): string {
   // Imported lazily through a helper so this module has exactly one place that
   // knows how a fingerprint is derived.
-  return fingerprintFn(id.sign.pub);
+  return fingerprintFn(id.sign.pub, id.seal.pub);
 }
 
 import { fingerprint as fingerprintFn } from "@seshi/core/identity";

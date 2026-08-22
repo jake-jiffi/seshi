@@ -146,7 +146,12 @@ export function sealEnvelope(e: Envelope, from: Identity, toSealPub: Uint8Array)
  * transport, never a key read out of the frame. Order matters and is tested:
  * decrypt, parse, verify, and only then stamp `from`.
  */
-export function openEnvelope(wire: Uint8Array, me: Identity, fromSignPub: Uint8Array): Envelope {
+export function openEnvelope(
+  wire: Uint8Array,
+  me: Identity,
+  fromSignPub: Uint8Array,
+  fromSealPub: Uint8Array,
+): Envelope {
   const plaintext = decrypt(wire, me);
 
   if (plaintext.length < SIG_BYTES) {
@@ -170,7 +175,7 @@ export function openEnvelope(wire: Uint8Array, me: Identity, fromSignPub: Uint8A
 
   // Spec §5.1. Whatever the sender wrote here is decoration; the only identity
   // that survives is the one we just proved with the signature.
-  e.from = fingerprint(fromSignPub);
+  e.from = fingerprint(fromSignPub, fromSealPub);
   return e;
 }
 

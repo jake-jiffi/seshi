@@ -24,12 +24,30 @@ export function generateIdentity(): Identity {
   };
 }
 
-/** The 16 lowercase hex chars that name a party everywhere in seshi. */
-export function fingerprint(signPub: Uint8Array): string {
+/**
+ * The 32 lowercase hex chars (128 bits) that name a party everywhere in seshi.
+ *
+ * BOTH public keys are bound in, and that is not decoration. If only the
+ * signing key were covered, an interceptor could take a real invite, leave
+ * signPub alone (they cannot forge a signature anyway) and swap in their own
+ * SEALING key. The fingerprint would still check out, the victim would pair
+ * happily, and every message they sent "to Jake" would be encrypted to the
+ * interceptor instead. That attack is a test in test/e2e/two-people.test.ts.
+ *
+ * 128 bits, not 64: a fingerprint is a trust-on-first-use pin, so impersonating
+ * a pinned contact is a second-preimage search. 2^64 is grindable.
+ */
+export function fingerprint(signPub: Uint8Array, sealPub: Uint8Array): string {
   if (signPub.length !== KEY_BYTES) {
     throw new Error(`fingerprint: signing key must be ${KEY_BYTES} bytes, got ${signPub.length}`);
   }
-  return bytesToHex(sha256(signPub)).slice(0, 16);
+  if (sealPub.length !== KEY_BYTES) {
+    throw new Error(`fingerprint: sealing key must be ${KEY_BYTES} bytes, got ${sealPub.length}`);
+  }
+  const bound = new Uint8Array(KEY_BYTES * 2);
+  bound.set(signPub, 0);
+  bound.set(sealPub, KEY_BYTES);
+  return bytesToHex(sha256(bound)).slice(0, 32);
 }
 
 /**

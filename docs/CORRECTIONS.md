@@ -52,3 +52,26 @@ into the environment of every Bash tool call, and subagents inherit them.
 process denies `SendMessage` and `ListAgents`. Any subagent, or any shell command, running inside a
 peer process would otherwise be able to address the human's own live sessions with no further
 permission. Demonstrated, not theorised.
+
+### C1 applied, and it closed a real attack
+
+Fixing the length surfaced a second, worse problem. The fingerprint covered only the SIGNING key, so
+an interceptor could take a real invite, leave `signPub` untouched (they cannot forge a signature
+anyway) and swap in **their own sealing key**. The fingerprint check still passed. The victim paired
+happily, and every message they sent "to Jake" was encrypted to the interceptor, who could read all
+of it. They could not send as Jake, only read everything sent to him.
+
+Demonstrated as a failing test before the fix, in
+`test/e2e/two-people.test.ts` → *"an invite cannot have its sealing key swapped while keeping the
+fingerprint"*.
+
+`fingerprint()` now takes both public keys and binds them into one digest, at 128 bits:
+
+```ts
+export function fingerprint(signPub: Uint8Array, sealPub: Uint8Array): string {
+  const bound = new Uint8Array(64);
+  bound.set(signPub, 0);
+  bound.set(sealPub, 32);
+  return bytesToHex(sha256(bound)).slice(0, 32);
+}
+```

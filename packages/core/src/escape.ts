@@ -40,7 +40,7 @@ const STACKING_MARK = /^[\p{Mn}\p{Me}]$/u;
  * is the whole reason the class exists.
  */
 const DEFAULT_IGNORABLE = /^\p{Default_Ignorable_Code_Point}$/u;
-const FINGERPRINT = /^[0-9a-f]{16}$/;
+const FINGERPRINT = /^[0-9a-f]{32}$/;
 const NAME_MAX = 64;
 
 export const PEER_TAG = "seshi-peer";
@@ -184,7 +184,7 @@ function escapeAttribute(v: string): string {
 export function wrapPeerText(s: string, fromFingerprint: string, name: string): string {
   if (!FINGERPRINT.test(fromFingerprint)) {
     throw new Error(
-      "wrapPeerText: from must be a 16 lowercase hex character fingerprint stamped by the receiver",
+      "wrapPeerText: from must be a 32 lowercase hex character fingerprint stamped by the receiver",
     );
   }
   return (

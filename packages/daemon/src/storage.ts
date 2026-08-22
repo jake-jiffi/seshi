@@ -54,7 +54,7 @@ import type { Tier } from "./tiers.ts";
 const DIR_MODE = 0o700;
 const SECRET_MODE = 0o600;
 
-const FINGERPRINT = /^[0-9a-f]{16}$/;
+const FINGERPRINT = /^[0-9a-f]{32}$/;
 /** Convo ids are ULIDs in practice; this is the widest safe shape for a path component. */
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -108,7 +108,7 @@ function checkIdentifier(value: string, label: string): string {
 
 function checkFingerprint(value: string): string {
   if (!FINGERPRINT.test(value))
-    throw new Error(`unsafe contact identifier, expected 16 hex chars: ${JSON.stringify(value)}`);
+    throw new Error(`unsafe contact identifier, expected 32 hex chars: ${JSON.stringify(value)}`);
   return value;
 }
 
@@ -237,7 +237,7 @@ export class Storage {
   fingerprint(): string {
     const id = this.readIdentity();
     if (id === null) throw new Error(`no identity in ${this.home}; run \`seshi init\` first`);
-    return fingerprint(id.sign.pub);
+    return fingerprint(id.sign.pub, id.seal.pub);
   }
 
   // --- control socket ---------------------------------------------------

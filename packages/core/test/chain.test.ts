@@ -6,7 +6,7 @@ import { openEnvelope, sealEnvelope, type Envelope } from "../src/envelope.ts";
 import { Chain, envelopeHash } from "../src/chain.ts";
 
 const HASH = /^sha256:[0-9a-f]{64}$/;
-const FINGERPRINT = /^[0-9a-f]{16}$/;
+const FINGERPRINT = /^[0-9a-f]{32}$/;
 
 function env(over: Partial<Envelope> = {}): Envelope {
   return {
@@ -40,7 +40,7 @@ function run(n: number): Envelope[] {
 
 test("the hash ignores `from`, which the receiver rewrites", () => {
   const sender = env({ from: "" });
-  const receiver = { ...sender, from: "a1b2c3d4e5f60718" };
+  const receiver = { ...sender, from: "a1b2c3d4e5f60718a1b2c3d4e5f60718" };
 
   assert.notEqual(sender.from, receiver.from);
   assert.equal(envelopeHash(sender), envelopeHash(receiver));
@@ -51,7 +51,7 @@ test("a sealed turn hashes the same on both machines", () => {
   const b = generateIdentity();
 
   const mine = env({ headline: "proposal", body: "swap the deadline" });
-  const theirs = openEnvelope(sealEnvelope(mine, a, b.seal.pub), b, a.sign.pub);
+  const theirs = openEnvelope(sealEnvelope(mine, a, b.seal.pub), b, a.sign.pub, a.seal.pub);
 
   // The receiver stamped its own value over `from`, per spec 5.1.
   assert.match(theirs.from, FINGERPRINT);
@@ -73,7 +73,7 @@ test("a sealed turn carrying a ledger and an artefact also hashes the same on bo
     ],
     artefact: { diff: "--- a\n+++ b\n", sha256: "cafe" },
   });
-  const theirs = openEnvelope(sealEnvelope(mine, a, b.seal.pub), b, a.sign.pub);
+  const theirs = openEnvelope(sealEnvelope(mine, a, b.seal.pub), b, a.sign.pub, a.seal.pub);
 
   assert.notEqual(theirs.from, mine.from);
   assert.equal(envelopeHash(theirs), envelopeHash(mine));
@@ -132,7 +132,7 @@ test("the hash is a `prev` the envelope schema accepts on the wire", () => {
   assert.match(h, HASH);
 
   const next = env({ seq: 2, prev: h });
-  const got = openEnvelope(sealEnvelope(next, a, b.seal.pub), b, a.sign.pub);
+  const got = openEnvelope(sealEnvelope(next, a, b.seal.pub), b, a.sign.pub, a.seal.pub);
   assert.equal(got.prev, h);
 });
 
@@ -245,7 +245,7 @@ test("a chain built by the sender verifies on the receiver, `from` and all", () 
     const mine = env({ seq, prev, body });
     sent.append(mine);
 
-    const theirs = openEnvelope(sealEnvelope(mine, a, b.seal.pub), b, a.sign.pub);
+    const theirs = openEnvelope(sealEnvelope(mine, a, b.seal.pub), b, a.sign.pub, a.seal.pub);
     assert.equal(received.verify(theirs), "ok");
     received.append(theirs);
   }
@@ -265,7 +265,7 @@ test("a receiver notices a turn that never arrived", () => {
     const { seq, prev } = sent.expectedNext();
     const mine = env({ seq, prev, body });
     sent.append(mine);
-    wire.push(openEnvelope(sealEnvelope(mine, a, b.seal.pub), b, a.sign.pub));
+    wire.push(openEnvelope(sealEnvelope(mine, a, b.seal.pub), b, a.sign.pub, a.seal.pub));
   }
 
   const received = new Chain();
