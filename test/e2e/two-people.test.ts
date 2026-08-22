@@ -29,6 +29,19 @@ process.on("exit", () => {
   for (const h of homes) rmSync(h, { recursive: true, force: true });
 });
 
+/** What a real join does: records the same conversation id on the other side. */
+function joinConvo(node: SeshiNode, convoId: string, peerFingerprint: string): void {
+  node.storage.putConvo({
+    id: convoId,
+    peer: peerFingerprint,
+    mode: "decide",
+    state: "live",
+    createdAt: new Date().toISOString(),
+    budget: { turns: 24, warnAt: 16, used: 0 },
+    brief: BRIEF,
+  });
+}
+
 const BRIEF: PublicBrief = {
   objective: "decide whether the events API is push or poll",
   definitionOfDone: ["one decision record both of us sign"],
@@ -79,6 +92,9 @@ test("a conversation crosses the wire and both sides record it", async (t) => {
   jake.pair(dave.invite());
 
   const convo = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
+  // Dave joins. Without this his daemon rejects the turn as belonging to a
+  // conversation he never started, which is the point of that check.
+  joinConvo(dave, convo.id, jake.fingerprint);
 
   await jake.send(convo.id, {
     seq: 1,
@@ -112,16 +128,7 @@ test("a full back-and-forth alternates and both transcripts agree", async (t) =>
   jake.pair(dave.invite());
 
   const convo = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
-  // Dave records the same conversation id, the way a real join would.
-  dave.storage.putConvo({
-    id: convo.id,
-    peer: jake.fingerprint,
-    mode: "decide",
-    state: "live",
-    createdAt: new Date().toISOString(),
-    budget: { turns: 24, warnAt: 16, used: 0 },
-    brief: BRIEF,
-  });
+  joinConvo(dave, convo.id, jake.fingerprint);
 
   const script: Array<[SeshiNode, SeshiNode, string, string]> = [
     [jake, dave, "PROPOSE", "Poll on a 30 second interval. No broker, no ops."],
@@ -284,4 +291,40 @@ test("an invite cannot have its sealing key swapped while keeping the fingerprin
     "swapping the sealing key must break the fingerprint",
   );
   assert.equal(dave.storage.listContacts().length, 0);
+});
+
+test("a paired peer cannot invent a conversation id on your disk", async (t) => {
+  const { jake, dave } = await twoPeople(t);
+  dave.pair(jake.invite());
+  jake.pair(dave.invite());
+
+  // Jake is genuinely paired, so his signature verifies. He names a
+  // conversation Dave never joined.
+  const bogus = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
+  await jake.send(bogus.id, { seq: 1, prev: null, act: "BRIEF", headline: "h", body: "b" });
+
+  await assert.rejects(() => dave.waitForTurn({ timeoutMs: 1200 }), /timed out/);
+  const rejected = dave.rejects.find((r) => /unknown conversation/.test(r.reason));
+  assert.ok(rejected, "must be refused as an unknown conversation");
+  assert.equal(existsSync(join(dave.storage.home, "convos", bogus.id, "log")), false,
+    "and must not have materialised a directory on the receiver's disk");
+});
+
+test("a replayed turn is refused rather than logged twice", async (t) => {
+  const { jake, dave } = await twoPeople(t);
+  dave.pair(jake.invite());
+  jake.pair(dave.invite());
+  const convo = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
+  joinConvo(dave, convo.id, jake.fingerprint);
+
+  const sent = await jake.send(convo.id, { seq: 1, prev: null, act: "BRIEF", headline: "h", body: "once" });
+  await dave.waitForTurn({ timeoutMs: 5000 });
+
+  // Anyone holding the frame, including the relay operator, replays it.
+  await jake.resend(convo.id, sent);
+  await jake.resend(convo.id, sent);
+
+  await assert.rejects(() => dave.waitForTurn({ timeoutMs: 1200 }), /timed out/);
+  assert.equal(dave.storage.readLog(convo.id, jake.fingerprint).length, 1, "logged exactly once");
+  assert.ok(dave.rejects.some((r) => /replayed|fork/.test(r.reason)));
 });

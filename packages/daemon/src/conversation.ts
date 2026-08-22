@@ -52,7 +52,9 @@ context and arguing for THEM. You carry your human's context and argue for yours
 
 Reply with ONE JSON object and nothing else. No prose before it, no code fence, no commentary.
 
-{"act":"<ACT>","headline":"<= 200 chars","body":"<= 1200 chars","ledger":[{"id":"i-01","state":"open"}]}
+{"act":"<ACT>","headline":"<= 200 chars","body":"<= 1200 chars",
+ "ledger":[{"id":"i-01","state":"open|claimed|proposed|agreed|parked|escalated"}],
+ "concessions":["only on RED_TEAM: what you gave up and what it cost your human"]}
 
 Valid acts: ${ACTS.join(" ")}
 
@@ -66,7 +68,12 @@ Rules that are not style preferences:
 - Do not agree in order to be agreeable. A fast agreement that skips a real disagreement is the
   single most common way these conversations fail. If you concede, name what you gave up and what
   it costs your human.
-- Use RED_TEAM near the end to argue against the position you are about to accept.
+- ALWAYS send the 'ledger' field with the CURRENT state of every open issue you were given. The
+  conversation is not finished when you feel finished; it is finished when the ledger is empty.
+  Valid states only: open, claimed, proposed, agreed, parked, escalated. Do not invent others.
+- Use RED_TEAM near the end to argue against the position you are about to accept, and on that turn
+  you MUST fill 'concessions' with what you actually gave up and what it costs your human. If you
+  cannot name one, you have not been negotiating, you have been agreeing.
 `;
 
 export type ConversationOptions = {
@@ -86,12 +93,16 @@ export class Conversation {
   readonly #ledger: Ledger;
   readonly #ledgerTrail: string[] = [];
   readonly #history: Envelope[] = [];
+  /** Concessions each party named, keyed by fingerprint. Fed to the detectors. */
+  readonly #concessions: Record<string, string[]> = {};
+  readonly #me: string;
   #seq = 0;
 
   constructor(opts: ConversationOptions) {
     this.#node = opts.node;
     this.#convo = opts.convo;
     this.#peer = opts.peer;
+    this.#me = opts.node.fingerprint;
 
     const tier = opts.tier ?? opts.peer.tier;
     if (tier === 1) {
@@ -184,12 +195,54 @@ export class Conversation {
         if (this.#ledger.get(entry.id) !== null) this.#ledger.markContested(entry.id);
       }
     }
+    this.#applyLedgerView(inbound);
+    this.#recordConcessions(inbound);
     this.#ledgerTrail.push(this.#ledger.fingerprint());
+    return this.detections();
+  }
+
+  /** Run the detectors over everything seen so far. */
+  detections(): Detection[] {
     return detect({
       history: this.#history,
       ledger: this.#ledger,
       ledgerTrail: this.#ledgerTrail,
+      namedConcessions: this.#concessions,
     });
+  }
+
+  /**
+   * Move the local ledger to match a turn's declared view.
+   *
+   * Without this the ledger never left `open`, so `agreement` could never fire
+   * and the fold detector's "seeded conflict agreed uncontested" arm was dead.
+   * Illegal or unknown transitions are ignored rather than throwing: a model
+   * naming a state it cannot legally reach is a model being wrong, not a reason
+   * to end the conversation. The local ledger stays authoritative, which is why
+   * a peer cannot add, delete or resurrect an issue through this path.
+   */
+  #applyLedgerView(e: Envelope): void {
+    for (const entry of e.ledger ?? []) {
+      const current = this.#ledger.get(entry.id);
+      if (current === null || current.state === entry.state) continue;
+      try {
+        this.#ledger.transition(entry.id, entry.state, {
+          reason: `declared by ${e.from === this.#me ? "us" : this.#peer.name} on turn ${e.seq}`,
+        });
+      } catch {
+        // Illegal transition. The ledger is the authority; the claim is dropped.
+      }
+    }
+  }
+
+  /**
+   * A RED_TEAM turn that names no concession is a fold, and the detector needs
+   * to be able to tell the difference between "named none" and "was never
+   * asked". So an empty array is recorded deliberately.
+   */
+  #recordConcessions(e: Envelope): void {
+    if (e.act !== "RED_TEAM") return;
+    this.#concessions[e.from] = e.concessions ?? [];
   }
 
   budgetExhausted(): boolean {
@@ -204,13 +257,19 @@ export class Conversation {
       v: 1,
       convo: this.#convo.id,
       seq: this.#seq,
-      prev: null,
-      from: "",
+      prev: null, // stamped by SeshiNode.send from our own chain
+      // Our own fingerprint, not "". detect() drops parties whose `from` is
+      // empty, so an unstamped self turn made `agreement` and `deadlock`
+      // structurally unreachable and hid our OWN agent from the fold detector.
+      from: this.#me,
       act: parsed.act,
       headline: parsed.headline,
       body: parsed.body,
       ...(parsed.ledger === undefined ? {} : { ledger: parsed.ledger }),
+      ...(parsed.concessions === undefined ? {} : { concessions: parsed.concessions }),
     };
+    this.#applyLedgerView(envelope);
+    this.#recordConcessions(envelope);
     this.#history.push(envelope);
     this.#ledgerTrail.push(this.#ledger.fingerprint());
     return envelope;
@@ -291,6 +350,7 @@ export function parseEnvelopeReply(raw: string): {
   headline: string;
   body: string;
   ledger?: Envelope["ledger"];
+  concessions?: string[];
 } {
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
   const candidate = fenced?.[1] ?? raw;
@@ -307,6 +367,7 @@ export function parseEnvelopeReply(raw: string): {
           headline: String(o["headline"] ?? "").slice(0, 200),
           body: String(o["body"] ?? "").slice(0, 1200),
           ...sanitiseLedger(o["ledger"]),
+          ...sanitiseConcessions(o["concessions"]),
         };
       }
     } catch {
@@ -332,6 +393,20 @@ export function parseEnvelopeReply(raw: string): {
  * meant by "closed" would put a state in the ledger that nothing actually
  * asserted.
  */
+/**
+ * A RED_TEAM turn must be able to say "I gave up nothing", because that is the
+ * fold signal. So an empty array is preserved and only a MISSING field becomes
+ * undefined. Collapsing the two would hide exactly the case we watch for.
+ */
+function sanitiseConcessions(value: unknown): { concessions?: string[] } {
+  if (!Array.isArray(value)) return {};
+  return {
+    concessions: value
+      .filter((c): c is string => typeof c === "string" && c.trim() !== "")
+      .map((c) => c.slice(0, 300)),
+  };
+}
+
 function sanitiseLedger(value: unknown): { ledger?: Envelope["ledger"] } {
   if (!Array.isArray(value)) return {};
   const states: readonly string[] = LEDGER_STATES;

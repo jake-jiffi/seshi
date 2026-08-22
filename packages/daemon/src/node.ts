@@ -31,6 +31,7 @@ import {
   type Identity,
 } from "@seshi/core/identity";
 import type { Envelope } from "@seshi/core/envelope";
+import { Chain } from "@seshi/core/chain";
 import { Storage, type Contact, type ConvoRecord, type PublicBrief } from "./storage.ts";
 import { RelayClient } from "./relay-client.ts";
 
@@ -70,6 +71,8 @@ export class SeshiNode {
   readonly #inbox: InboundTurn[] = [];
   readonly #rejects: Array<{ from: string; reason: string }> = [];
   readonly #waiters: Array<(t: InboundTurn) => void> = [];
+  /** One hash chain per (conversation, party). Keyed `${convo}/${party}`. */
+  readonly #chains = new Map<string, Chain>();
 
   private constructor(opts: SeshiNodeOptions, storage: Storage, identity: Identity) {
     this.storage = storage;
@@ -214,7 +217,19 @@ export class SeshiNode {
     if (convo === null) throw new Error(`unknown conversation: ${convoId}`);
     const peer = this.contact(convo.peer);
 
-    const envelope: Envelope = { ...e, v: 1, convo: convoId, from: "" };
+    // seq and prev come from OUR chain, not from the caller. A caller that
+    // guesses them wrong would produce a chain the peer reads as a fork.
+    const mine = this.#chain(convoId, "self");
+    const next = mine.expectedNext();
+    const envelope: Envelope = {
+      ...e,
+      v: 1,
+      convo: convoId,
+      from: this.fingerprint,
+      seq: next.seq,
+      prev: next.prev,
+    };
+    mine.append(envelope);
     this.storage.appendLog(convoId, "self", envelope);
     this.storage.appendAudit(convoId, {
       at: new Date().toISOString(),
@@ -226,6 +241,16 @@ export class SeshiNode {
 
     await this.#client.send(peer, envelope);
     return envelope;
+  }
+
+  /**
+   * Re-send an envelope exactly as it was. Only useful for proving that the
+   * receiving side refuses a replay, which is why it exists.
+   */
+  async resend(convoId: string, envelope: Envelope): Promise<void> {
+    const convo = this.storage.getConvo(convoId);
+    if (convo === null) throw new Error(`unknown conversation: ${convoId}`);
+    await this.#client.send(this.contact(convo.peer), envelope);
   }
 
   /** Resolve with the next inbound turn, or reject on timeout. */
@@ -250,11 +275,68 @@ export class SeshiNode {
     this.#client.close();
   }
 
+  /**
+   * Everything a verified frame must still survive before it counts as a turn.
+   *
+   * The signature proves WHO sent it. It does not prove the envelope belongs to
+   * a conversation we are in, nor that we have not already seen it. Without the
+   * first check a paired peer can name any conversation id and materialise a
+   * directory on our disk for a conversation we never started. Without the
+   * second, anyone who captures a frame (including the relay operator) can
+   * replay a turn to skew the transcript, the budget and the capitulation rate.
+   */
   #deliver(envelope: Envelope, contact: Contact): void {
+    const convo = this.storage.getConvo(envelope.convo);
+    if (convo === null) {
+      this.#rejects.push({
+        from: contact.fingerprint,
+        reason: `unknown conversation ${envelope.convo}: we never started or joined it`,
+      });
+      return;
+    }
+    if (convo.peer !== contact.fingerprint) {
+      this.#rejects.push({
+        from: contact.fingerprint,
+        reason: `conversation ${envelope.convo} is with ${convo.peer}, not with them`,
+      });
+      return;
+    }
+
+    const chain = this.#chain(envelope.convo, contact.fingerprint);
+    const verdict = chain.verify(envelope);
+    if (verdict === "fork") {
+      // A replayed or rewritten turn. Both look identical from here and both
+      // are refused: an honest peer never sends either.
+      this.#rejects.push({
+        from: contact.fingerprint,
+        reason: `replayed or rewritten turn at seq ${envelope.seq}: chain says fork`,
+      });
+      return;
+    }
+    if (verdict === "gap") {
+      // A turn went missing. Record it and carry on: the transcript is now
+      // known-incomplete, which is better than pretending it is not.
+      this.#rejects.push({
+        from: contact.fingerprint,
+        reason: `gap before seq ${envelope.seq}: a turn never arrived`,
+      });
+    }
+    chain.append(envelope);
+
     this.storage.appendLog(envelope.convo, contact.fingerprint, envelope);
     const waiter = this.#waiters.shift();
     if (waiter !== undefined) waiter({ envelope, contact });
     else this.#inbox.push({ envelope, contact });
+  }
+
+  #chain(convoId: string, party: string): Chain {
+    const key = `${convoId}/${party}`;
+    let chain = this.#chains.get(key);
+    if (chain === undefined) {
+      chain = new Chain();
+      this.#chains.set(key, chain);
+    }
+    return chain;
   }
 }
 

@@ -75,3 +75,62 @@ export function fingerprint(signPub: Uint8Array, sealPub: Uint8Array): string {
   return bytesToHex(sha256(bound)).slice(0, 32);
 }
 ```
+
+## C4. The detectors were inert in the running system
+
+Found by adversarial review, and it is the most important defect in the project so far. Every
+detector unit test passed while the detectors could not fire at all in production, because the tests
+synthesised histories the real `Conversation` never produced.
+
+Three independent wiring gaps, all confirmed by grep:
+
+1. **Self turns carried `from: ""`.** `detect()` filters parties with an empty `from`, so `parties`
+   only ever held the peer. `agreement` and `deadlock` both return null below two parties, so
+   neither could ever fire. Worse, the capitulation arm iterated `parties`, so **our own agent
+   folding was invisible** — the one case the human most needs told about.
+2. **`Ledger.transition()` was called nowhere in `packages/*/src`.** No issue ever left `open`, so
+   `uncontestedSeededAgreements()` (which requires `agreed`) was dead, and `agreement`'s
+   `openCount() === 0` gate was permanently false.
+3. **`namedConcessions` was never supplied by any caller**, so the third fold condition was dead.
+
+Net effect: "degenerate agreement", which the spec calls the detector that matters most, reduced to
+a capitulation check applied only to the remote peer.
+
+**Fixed by:** stamping self turns with our own fingerprint; applying declared ledger states through
+`#applyLedgerView` (illegal transitions ignored, local ledger stays authoritative so a peer still
+cannot add or resurrect an issue); adding `concessions` to the envelope and requiring it on
+`RED_TEAM` in the protocol text.
+
+**The lesson, which is the reason this entry is long:** a unit test that calls `detect()` directly
+cannot catch this class of bug. `test/e2e/detector-wiring.test.ts` now drives the real
+`Conversation` against a fake `claude` on PATH. That file must keep existing for as long as the
+detectors matter.
+
+## C5. No replay protection, and inbound was not scoped to a conversation
+
+Also from the review, with a working reproduction: one sealed frame re-injected three times was
+accepted and logged three times. `Chain` existed, was fully tested, and was imported by nothing.
+Generated envelopes always carried `prev: null`.
+
+Separately, a paired peer could name **any** conversation id, and `appendLog` would create
+`convos/<id>/log/<peer>.jsonl` on the receiver's disk for a conversation they never started.
+
+**Fixed by:** `SeshiNode` now keeps a `Chain` per `(conversation, party)`. `send()` takes `seq` and
+`prev` from our own chain rather than the caller. `#deliver()` refuses an envelope whose conversation
+we never joined, refuses one whose conversation belongs to a different peer, and refuses a `fork`
+verdict as a replay. A `gap` is recorded but delivered, because a known-incomplete transcript beats
+pretending it is complete.
+
+## C6. Known, accepted, not yet fixed
+
+- **`contested` is peer-influenced.** `observe()` marks an issue contested from the peer's
+  COUNTER/REJECT ledger references without proving a real contest happened, so a peer could suppress
+  the "seeded conflict agreed uncontested" arm. Latent rather than urgent, and it needs a definition
+  of "genuine contest" that is not itself gameable.
+- **Peer env is a blocklist, not an allowlist.** `buildEnv` strips nine named variables; anything
+  else in the daemon's environment is inherited. Mitigated because tiers 2 and 3 deny `Bash`,
+  `WebFetch` and every MCP, so the child has no tool with which to read or exfiltrate it. An
+  allowlist is still the right end state.
+- **The relay's `hello` is unauthenticated.** Squatting a fingerprint can swallow queued frames. It
+  cannot read them (no private key) or forge them (signatures verify at the receiver). Fix is a
+  signed challenge at connect.

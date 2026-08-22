@@ -61,6 +61,13 @@ export type Envelope = {
   body: string; // <= BODY_MAX
   ledger?: LedgerEntry[];
   artefact?: { diff: string; sha256: string };
+  /**
+   * What this party gave up, and what it cost their human. Required in spirit
+   * on a RED_TEAM turn: an agent that red-teams a deal it is about to sign but
+   * cannot name a single concession is folding, and the degenerate detector
+   * keys on exactly that.
+   */
+  concessions?: string[];
 };
 
 export const HEADLINE_MAX = 200;
@@ -276,7 +283,16 @@ function validate(value: unknown): Envelope {
 
   if (r["ledger"] !== undefined) out.ledger = readLedger(r["ledger"]);
   if (r["artefact"] !== undefined) out.artefact = readArtefact(r["artefact"]);
+  if (r["concessions"] !== undefined) out.concessions = readConcessions(r["concessions"]);
   return out;
+}
+
+function readConcessions(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error("envelope: concessions must be an array");
+  return value.map((c, i) => {
+    if (typeof c !== "string") throw new Error(`envelope: concessions[${i}] must be a string`);
+    return c.slice(0, 300);
+  });
 }
 
 function readLedger(value: unknown): LedgerEntry[] {
