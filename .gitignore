@@ -10,3 +10,4 @@ build/
 
 # Local seshi state (identity keys, session logs, contacts)
 .seshi/
+build-manifest.json
