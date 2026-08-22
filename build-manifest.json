@@ -12,7 +12,15 @@
   "layers_read": [],
   "files_written": [
     "/Users/jakeshelley/dev/jiffi-seshi/docs/superpowers/specs/2026-08-23-seshi-design.md",
-    "/Users/jakeshelley/dev/jiffi-seshi/docs/superpowers/plans/2026-08-23-seshi-prototype.md"
+    "/Users/jakeshelley/dev/jiffi-seshi/docs/superpowers/plans/2026-08-23-seshi-prototype.md",
+    "/Users/jakeshelley/dev/jiffi-seshi/docs/adr/001-transport-and-reuse.md",
+    "/Users/jakeshelley/dev/jiffi-seshi/packages/core/test/identity.test.ts",
+    "/Users/jakeshelley/dev/jiffi-seshi/README.md",
+    "/Users/jakeshelley/dev/jiffi-seshi/packages/core/src/identity.ts",
+    "/Users/jakeshelley/dev/jiffi-seshi/packages/core/test/fixtures/injection-corpus.json",
+    "/private/tmp/claude-501/-Users-jakeshelley-dev-jiffi-seshi/b835d3fa-0525-4f77-9fc5-cca2005273e3/scratchpad/gen-corpus.mjs",
+    "/Users/jakeshelley/dev/jiffi-seshi/packages/core/test/escape.test.ts",
+    "/Users/jakeshelley/dev/jiffi-seshi/packages/core/src/escape.ts"
   ],
   "files_written_outside": [],
   "sections": [],
@@ -26,5 +34,10 @@
   "verifier": null,
   "buildability": null,
   "architecture": null,
-  "grounding": null
+  "grounding": {
+    "state": "ungrounded",
+    "mcp_calls": 0,
+    "checked_at": "2026-08-22T14:57:32.055Z",
+    "note": "MCP-depth gate UNGROUNDED: no Palate MCP calls recorded, so this build carries no Palate taste layer (the MCP is not connected or was renamed, or the survey ran in a subagent whose calls never reached this manifest). Connect it with: claude mcp add --scope user --transport http palate https://mcp.palatemcp.com/api/mcp"
+  }
 }

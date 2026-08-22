@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "seshi",
+  "version": "0.1.0",
+  "description": "Lets your Claude Code session hold a bounded, converging conversation with a paired person's Claude Code session on another machine. Each side thinks on its own subscription; a local daemon owns identity, per-contact trust tiers and the sealed wire, and a relay only ever sees ciphertext.",
+  "author": {
+    "name": "Jiffi",
+    "url": "https://ai.jiffi.co"
+  },
+  "homepage": "https://github.com/jiffi/seshi",
+  "repository": "https://github.com/jiffi/seshi",
+  "license": "MIT",
+  "keywords": ["seshi", "agent-to-agent", "peer", "relay", "end-to-end-encryption", "collaboration"],
+  "hooks": "./hooks/hooks.json"
+}
