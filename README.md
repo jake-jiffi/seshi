@@ -101,10 +101,11 @@ production work, and the gaps below are honest.
 | 1 | Envelopes, relay, two identities talking | **done** |
 | 2 | Pairing, safety words, tier 2, escaper, offline queue | **done** |
 | 3 | Ledger, convergence detectors, `DECISION.md` | **done** |
-| 4 | Tier 3 worktrees and staged diffs | scaffolded, not exercised |
+| 4 | Tier 3 worktrees and staged diffs | **done** |
 | 5 | Tier 4 | see the table above |
 
-229 tests. Typecheck clean. Node 24 runs the TypeScript directly, so there is no build step.
+270 tests. Typecheck clean. Node 24 runs the TypeScript directly, so there is no build step.
+Every security fix is red-green verified: the mechanism is reverted and a test is confirmed to fail.
 
 ### What a real run looks like
 
@@ -130,11 +131,42 @@ the ledger, so `DECISION.md` correctly says *"No issue reached agreement. This i
 list, not a decision."* It would have been easy to call that a success. It isn't one, and seshi says
 so.
 
+### The detectors, and what three review rounds did to them
+
+Three adversarial passes found, in order, that the detectors were **inert** (they could not fire at
+all in the running system while every unit test passed), then **evadable**, then **noisy** (five of
+eight hand-built healthy conversations fired a spurious fold).
+
+Two arms were **deleted rather than tuned**, because a detector the human learns to ignore costs you
+every real detection:
+
+| Arm | State | Why |
+|---|---|---|
+| agreement | kept | Empty ledger + both red-teamed + both signed the same normalised artefact |
+| deadlock | kept | Three unchanged positions over two rounds |
+| looping | kept | Ledger unmoved for four turns |
+| degenerate: capitulation | kept, **mode-aware** | Only in decide/build. A teach learner accepting is the point; a review author accepting real findings is the goal |
+| degenerate: seeded uncontested | kept, **needs real opposition** | Two people happening to agree on a shared topic is not a fold |
+| degenerate: adoption | **deleted** | Fired on a teach learner honestly restating a method, and was defeated by paraphrase. Caught the wrong direction |
+| degenerate: concession relatedness | **deleted** | Flagged genuine concessions phrased as abstractions; any pleasant sentence reusing two words passed |
+
+Both deletions are recorded as passing tests named `KNOWN GAP: …`, so the holes are visible rather
+than forgotten. `packages/core/test/detectors-false-positives.test.ts` is the specification for what
+a healthy conversation looks like; anything in it that starts failing means a detector has become
+noise again.
+
 ### Known gaps, stated plainly
 
-- **Agents under-use the ledger.** They argue well in prose and forget to move issues, so
-  convergence detection is starved. The protocol asks for it; the models mostly do not comply. This
-  is the biggest open problem and it is a prompt-and-protocol problem, not a plumbing one.
+- **A determined model can still fold undetected.** Relabelling a fold, or naming a plausible but
+  fake concession, both get through. These detectors raise the cost and catch the common shapes.
+  They are not proof of good faith, which is why `DECISION.md` reports what fired rather than
+  claiming a conversation was sound.
+- **Agreement over independently-produced diffs.** Hashes are normalised for line endings and
+  trailing whitespace, but a real `git diff` embeds `index <blob>..<blob>` lines that depend on each
+  person's base tree, so two independent diffs of the same change are never equal. The real fix is
+  one side proposing exact artefact bytes and the other echoing them. Not done.
+- **Agents under-use the ledger.** They argue well in prose and sometimes forget to move issues. The
+  protocol asks for it and compliance is partial. A prompt-and-protocol problem, not plumbing.
 - **The relay's `hello` is unauthenticated.** A client asserts its own fingerprint. It cannot read
   anyone's mail (that needs the private key) and cannot forge a frame (signatures are verified at
   the receiver), but it could squat a fingerprint and swallow queued frames. Fix is a signed
