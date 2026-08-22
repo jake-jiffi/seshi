@@ -162,8 +162,22 @@ export class Conversation {
     return this.#turn(prompt);
   }
 
-  /** Fold the peer's ledger view in, and run the detectors. */
+  /**
+   * Fold a RECEIVED envelope in, and run the detectors.
+   *
+   * The guard is not defensive noise. An envelope built locally carries
+   * `from: ""` until the receiving daemon stamps it, so handing this method a
+   * locally-created envelope silently files the peer's turn as our own. The
+   * first live run did exactly that and produced a DECISION.md that credited
+   * Dave's red team to Jake.
+   */
   observe(inbound: Envelope): Detection[] {
+    if (inbound.from === "") {
+      throw new Error(
+        "observe() takes an envelope received from the wire, with `from` stamped by this daemon. " +
+          "It was handed one built locally, which would file the peer's turn as our own.",
+      );
+    }
     this.#history.push(inbound);
     if (inbound.act === "COUNTER" || inbound.act === "REJECT") {
       for (const entry of inbound.ledger ?? []) {
@@ -208,7 +222,8 @@ export class Conversation {
     const md = [
       `# ${this.#convo.brief.objective}`,
       ``,
-      `Mode: **${this.#convo.mode}** · Turns: ${this.#seq} · With: ${this.#peer.name} (\`${this.#peer.fingerprint}\`)`,
+      `Mode: **${this.#convo.mode}** · Turns: ${this.#history.length} total, ${this.#seq} ours · ` +
+        `With: ${this.#peer.name} (\`${this.#peer.fingerprint}\`)`,
       ``,
       `## Decision`,
       ``,
@@ -242,7 +257,9 @@ export class Conversation {
       ``,
       `## Transcript`,
       ``,
-      ...this.#history.map((e) => `**${e.from === "" ? "us" : e.from.slice(0, 8)}** \`${e.act}\` ${e.headline}`),
+      ...this.#history.map(
+        (e) => `**${e.from === "" ? "us" : `${this.#peer.name} ${e.from.slice(0, 8)}`}** \`${e.act}\` ${e.headline}`,
+      ),
       ``,
       `---`,
       `Written by seshi. Both sides hold their own copy; neither is authoritative over the other.`,

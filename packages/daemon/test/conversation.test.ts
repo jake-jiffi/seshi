@@ -56,3 +56,16 @@ test("caps are enforced at the parse boundary", () => {
   assert.equal(r.headline.length, 200);
   assert.equal(r.body.length, 1200);
 });
+
+test("observe refuses an envelope that was built locally rather than received", async () => {
+  const { Conversation } = await import("../src/conversation.ts");
+  const local = {
+    v: 1 as const, convo: "c", seq: 1, prev: null, from: "",
+    act: "PROPOSE" as const, headline: "h", body: "b",
+  };
+  // Reach the guard without booting a whole node: it is the first statement.
+  assert.throws(
+    () => Conversation.prototype.observe.call({} as never, local),
+    /received from the wire/,
+  );
+});

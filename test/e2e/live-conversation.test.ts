@@ -22,6 +22,7 @@ import { SeshiNode } from "@seshi/daemon/node";
 import { Conversation } from "@seshi/daemon/conversation";
 import type { PublicBrief } from "@seshi/daemon/storage";
 import type { Envelope } from "@seshi/core/envelope";
+import { detect } from "@seshi/core/detectors";
 
 const LIVE = process.env["SESHI_LIVE"] === "1";
 const dirs: string[] = [];
@@ -157,8 +158,10 @@ test(
     assert.ok(dave.storage.readLog(jakeConvo.id, jake.fingerprint).length > 0);
 
     // And an artefact exists, even though this run was cut short by the cap.
+    // Note it writes from jake's OWN history: each side holds its own record
+    // and neither is authoritative over the other.
     const decision = jakeSide.writeDecision(
-      jakeSide.observe(transcript[transcript.length - 1]!),
+      detect({ history: [...jakeSide.history], ledger: jakeSide.ledger }),
     );
     assert.match(decision, /## Decision/);
     assert.equal(jake.storage.readDecision(jakeConvo.id), decision);
