@@ -26,7 +26,10 @@ const USAGE = `seshi — your Claude talks to their Claude
   seshi contacts               who you are paired with, and at what tier
   seshi tier <name> <1|2|3>    lower a contact's tier (raising is a file edit, on purpose)
   seshi talk <name> <mode> <objective>
-                               run a conversation. mode: teach | decide | build | review
+                               START a conversation. mode: teach | decide | build | review
+                               Prints the one line the other person runs.
+  seshi join <name> <convo-id> <objective>
+                               JOIN a conversation they started, with your own objective
   seshi convos                 conversations on this machine
   seshi decision <convo-id>    print the artefact
   seshi relay [port]           run a relay (default 8787)
@@ -153,7 +156,16 @@ async function main(argv: string[]): Promise<number> {
         if (who === undefined || mode === undefined || objective === "") {
           throw new Error('usage: seshi talk <name> <teach|decide|build|review> "<objective>"');
         }
-        return await talk(node, who, mode, objective);
+        return await converse(node, { who, mode, objective, opensFirst: true });
+      }
+
+      case "join": {
+        const [who, convoId, ...rest] = args;
+        const objective = rest.join(" ");
+        if (who === undefined || convoId === undefined || objective === "") {
+          throw new Error('usage: seshi join <name> <convo-id> "<your objective>"');
+        }
+        return await converse(node, { who, convoId, objective, opensFirst: false });
       }
 
       default:
@@ -161,16 +173,23 @@ async function main(argv: string[]): Promise<number> {
         return 1;
     }
   } finally {
-    if (cmd !== "talk") node.close();
+    if (cmd !== "talk" && cmd !== "join") node.close();
   }
 }
 
 /**
- * Start a conversation and stream it. This is the watching-live half of the
- * product: every turn is printed as it happens, and Ctrl-C is the interrupt.
+ * Run one side of a conversation and stream it.
+ *
+ * Both people run this. The only difference is who speaks first: the starter
+ * opens from its own brief, the joiner waits. Everything else — the tier gates,
+ * the detector reporting, the interrupt, the artefact — is identical, because
+ * neither side is authoritative over the other.
  */
-async function talk(node: SeshiNode, who: string, mode: string, objective: string): Promise<number> {
-  const peer = node.contact(who);
+async function converse(
+  node: SeshiNode,
+  opts: { who: string; mode?: string; convoId?: string; objective: string; opensFirst: boolean },
+): Promise<number> {
+  const peer = node.contact(opts.who);
   if (peer.tier === 1) {
     process.stderr.write(
       `${peer.name} is tier 1, which is words only: no Claude process is spawned for them.\n` +
@@ -187,26 +206,36 @@ async function talk(node: SeshiNode, who: string, mode: string, objective: strin
   }
 
   // A brief with no non-negotiables seeds an EMPTY ledger, and an empty ledger
-  // makes half the convergence machinery structurally dead: nothing can be
-  // "agreed uncontested" if nothing was ever seeded, and `agreement` reduces to
-  // a trivially-true open-count check. So the objective itself becomes the
-  // first issue. It is a weak brief and seshi says so rather than pretending.
+  // makes half the convergence machinery structurally dead. So the objective
+  // itself becomes the first issue. It is a weak brief and seshi says so.
   const brief = {
-    objective,
-    definitionOfDone: [`both sides sign one decision on: ${objective}`],
-    nonNegotiables: [{ text: objective, reason: "stated as the point of this conversation" }],
+    objective: opts.objective,
+    definitionOfDone: [`both sides sign one decision on: ${opts.objective}`],
+    nonNegotiables: [{ text: opts.objective, reason: "stated as the point of this conversation" }],
     facts: [],
   };
-  process.stdout.write(
-    `  note: no non-negotiables given, so the objective itself is the only seeded issue.\n` +
-      `  Convergence detection is weaker without a real brief.\n`,
-  );
 
-  const convo = node.startConvo({ peer: peer.fingerprint, mode, brief });
+  // The starter mints the id. The joiner is told it out of band, which is what
+  // keeps a peer from materialising conversations on your disk uninvited.
+  const mode = opts.mode ?? node.storage.getConvo(opts.convoId ?? "")?.mode ?? "decide";
+  let convo;
+  if (opts.opensFirst) {
+    convo = node.startConvo({ peer: peer.fingerprint, mode, brief });
+  } else {
+    const id = opts.convoId!;
+    if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error(`that does not look like a conversation id: ${id}`);
+    node.storage.putConvo({
+      id,
+      peer: peer.fingerprint,
+      mode,
+      state: "live",
+      createdAt: new Date().toISOString(),
+      budget: { turns: 24, warnAt: 16, used: 0 },
+      brief,
+    });
+    convo = node.storage.getConvo(id)!;
+  }
 
-  // Tier 3 writes, so it needs a repo to cut a throwaway worktree from. The
-  // current directory is the honest default: it is the repo the human is
-  // standing in when they start the conversation.
   const side = new Conversation({
     node,
     convo,
@@ -216,20 +245,20 @@ async function talk(node: SeshiNode, who: string, mode: string, objective: strin
   });
   if (peer.tier === 3) {
     process.stdout.write(
-      `  tier 3: their agent may PROPOSE writes into a throwaway worktree cut from
-` +
-        `  ${process.cwd()}. Your checkout is not touched. You get a patch.
-`,
+      `  tier 3: their agent may PROPOSE writes into a throwaway worktree cut from\n` +
+        `  ${process.cwd()}. Your checkout is not touched. You get a patch.\n`,
     );
   }
 
-  process.stdout.write(`\n  ${mode} with ${peer.name} · ${convo.id}\n`);
-  process.stdout.write(`  ${objective}\n\n  starting their agent...\n`);
+  process.stdout.write(`\n  ${mode} with ${peer.name}\n  ${opts.objective}\n`);
+  if (opts.opensFirst) {
+    process.stdout.write(
+      `\n  Send ${peer.name} this line, then wait. Nothing happens until they run it:\n\n` +
+        `    seshi join ${node.name} ${convo.id} "<their own objective>"\n\n`,
+    );
+  }
+  process.stdout.write(`  starting your agent...\n`);
   await side.open();
-
-  const opening = await side.openingTurn();
-  print("you", opening);
-  await node.send(convo.id, opening);
 
   const stop = () => {
     side.discardWorktree();
@@ -243,8 +272,22 @@ async function talk(node: SeshiNode, who: string, mode: string, objective: strin
     process.exit(0);
   });
 
+  if (opts.opensFirst) {
+    const opening = await side.openingTurn();
+    print("you", opening);
+    await node.send(convo.id, opening);
+  } else {
+    process.stdout.write(`  waiting for ${peer.name} to speak...\n`);
+  }
+
   for (let i = 0; i < convo.budget.turns; i += 1) {
-    const inbound = await node.waitForTurn({ timeoutMs: 300_000 });
+    let inbound;
+    try {
+      inbound = await node.waitForTurn({ timeoutMs: 600_000 });
+    } catch {
+      process.stdout.write(`\n  ${peer.name} went quiet. Writing what we have.\n`);
+      break;
+    }
     print(peer.name, inbound.envelope);
     const found = side.observe(inbound.envelope);
 
@@ -264,10 +307,9 @@ async function talk(node: SeshiNode, who: string, mode: string, objective: strin
     if (reply.act === "CLOSE") break;
   }
 
-  // detections(), not a bare detect(): the live loop feeds namedConcessions and
-  // the ledger trail, and the final report must not be weaker than the running one.
   side.writeDecision(side.detections());
-  process.stdout.write(`\n  budget spent. written to convos/${convo.id}/DECISION.md\n`);
+  process.stdout.write(`\n  done. written to convos/${convo.id}/DECISION.md\n`);
+  process.stdout.write(`  read it with: seshi decision ${convo.id}\n`);
   stop();
   return 0;
 }

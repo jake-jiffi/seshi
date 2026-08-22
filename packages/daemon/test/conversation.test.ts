@@ -70,3 +70,26 @@ test("observe refuses an envelope that was built locally rather than received", 
   );
 });
 
+
+test("each side of a conversation gets its own local session id", async () => {
+  const { localSessionId } = await import("../src/conversation.ts");
+  const convo = "46d0a108-aaa2-4dbb-b5f6-17a7eb66234a";
+  const jake = "a".repeat(32);
+  const dave = "b".repeat(32);
+
+  const a = localSessionId(convo, jake);
+  const b = localSessionId(convo, dave);
+
+  // Claude Code refuses a session id already in use, so the two sides must
+  // differ or the second agent to start dies.
+  assert.notEqual(a, b, "both sides sharing a session id kills the second agent");
+  assert.notEqual(a, convo, "the shared conversation id must not be used directly");
+
+  // Stable, so --resume finds the same session after a restart.
+  assert.equal(a, localSessionId(convo, jake));
+
+  // And a real UUID, which is what --session-id accepts.
+  for (const id of [a, b]) {
+    assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  }
+});

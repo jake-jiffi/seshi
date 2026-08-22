@@ -23,6 +23,8 @@ import { detect, type Detection } from "@seshi/core/detectors";
 import { PeerAgent } from "./peer-agent.ts";
 import { tierSettings, type Tier } from "./tiers.ts";
 import { branchNameFor, createWorktree, type Worktree } from "./worktree.ts";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import type { Contact, ConvoRecord, PublicBrief } from "./storage.ts";
 import type { SeshiNode } from "./node.ts";
 
@@ -150,7 +152,15 @@ export class Conversation {
     );
 
     this.#agent = new PeerAgent({
-      convoId: opts.convo.id,
+      // A LOCAL session id, not the shared conversation id.
+      //
+      // Both sides of a conversation share its id, and Claude Code refuses to
+      // start with a session id that is already in use. Passing the shared id
+      // meant the second side to start died with "Session ID ... is already in
+      // use" whenever both agents ran under one ~/.claude. Deriving it from the
+      // conversation AND our own fingerprint keeps it stable across restarts
+      // (so --resume still works) while making the two sides distinct.
+      convoId: localSessionId(opts.convo.id, this.#me),
       settingsPath,
       // The one directory the agent may touch. At tier 3 that is the worktree,
       // never the human's checkout.
@@ -397,6 +407,19 @@ export class Conversation {
     this.#node.storage.writeDecision(this.#convo.id, md);
     return md;
   }
+}
+
+/** A deterministic UUID for this side of a conversation. */
+export function localSessionId(convoId: string, myFingerprint: string): string {
+  const h = bytesToHex(sha256(utf8ToBytes(`seshi-session:${convoId}:${myFingerprint}`)));
+  // Shape the digest into a v4-looking UUID, which is what --session-id accepts.
+  return [
+    h.slice(0, 8),
+    h.slice(8, 12),
+    `4${h.slice(13, 16)}`,
+    ((parseInt(h[16]!, 16) & 0x3) | 0x8).toString(16) + h.slice(17, 20),
+    h.slice(20, 32),
+  ].join("-");
 }
 
 function briefText(b: PublicBrief): string {
