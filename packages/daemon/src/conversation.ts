@@ -22,6 +22,7 @@ import { Ledger } from "@seshi/core/ledger";
 import { detect, type Detection } from "@seshi/core/detectors";
 import { PeerAgent } from "./peer-agent.ts";
 import { tierSettings, type Tier } from "./tiers.ts";
+import { branchNameFor, createWorktree, type Worktree } from "./worktree.ts";
 import type { Contact, ConvoRecord, PublicBrief } from "./storage.ts";
 import type { SeshiNode } from "./node.ts";
 
@@ -83,6 +84,12 @@ export type ConversationOptions = {
   /** Directory the peer agent may read. */
   scopedDir: string;
   tier?: Tier;
+  /**
+   * Repository the peer agent may PROPOSE writes into, at tier 3 only. A
+   * throwaway worktree is cut from it; the human's own checkout is never
+   * touched and never changes branch.
+   */
+  repo?: string;
 };
 
 export class Conversation {
@@ -96,6 +103,7 @@ export class Conversation {
   /** Concessions each party named, keyed by fingerprint. Fed to the detectors. */
   readonly #concessions: Record<string, string[]> = {};
   readonly #me: string;
+  readonly #worktree: Worktree | null;
   #seq = 0;
 
   constructor(opts: ConversationOptions) {
@@ -111,17 +119,42 @@ export class Conversation {
       );
     }
 
+    // Tier 3 is the only tier that writes, and it writes into a throwaway
+    // worktree rather than anywhere a human is working.
+    if (tier === 3) {
+      if (opts.repo === undefined) {
+        throw new Error("tier 3 needs a repo to cut a worktree from: pass `repo`");
+      }
+      this.#worktree = createWorktree({
+        repo: opts.repo,
+        branch: branchNameFor(opts.peer.name, opts.convo.id),
+        path: join(this.#node.storage.convoDir(opts.convo.id), "worktree"),
+      });
+    } else {
+      this.#worktree = null;
+    }
+
+    const workDir = this.#worktree?.path ?? opts.scopedDir;
     const settingsPath = join(this.#node.storage.convoDir(opts.convo.id), `tier${tier}.settings.json`);
     writeFileSync(
       settingsPath,
-      JSON.stringify(tierSettings(tier, { seshiHome: this.#node.storage.home }), null, 2),
+      JSON.stringify(
+        tierSettings(tier, {
+          seshiHome: this.#node.storage.home,
+          ...(this.#worktree === null ? {} : { worktree: this.#worktree.path }),
+        }),
+        null,
+        2,
+      ),
       { mode: 0o600 },
     );
 
     this.#agent = new PeerAgent({
       convoId: opts.convo.id,
       settingsPath,
-      scopedDir: opts.scopedDir,
+      // The one directory the agent may touch. At tier 3 that is the worktree,
+      // never the human's checkout.
+      scopedDir: workDir,
     });
 
     this.#ledger = Ledger.seeded(
@@ -146,6 +179,16 @@ export class Conversation {
 
   stop(): void {
     this.#agent.stop();
+  }
+
+  /** Tier 3's output: a patch, for the human to read and apply themselves. */
+  proposedPatch(): string | null {
+    return this.#worktree?.diff() ?? null;
+  }
+
+  /** Throw the tier 3 sandbox away. Safe to call at any tier, and twice. */
+  discardWorktree(): void {
+    this.#worktree?.remove();
   }
 
   /** The agent's opening move, from its own human's brief. Nothing from the peer yet. */
@@ -221,6 +264,23 @@ export class Conversation {
    * to end the conversation. The local ledger stays authoritative, which is why
    * a peer cannot add, delete or resurrect an issue through this path.
    */
+  #patchSection(): string[] {
+    const patch = this.#worktree === null ? null : this.#worktree.diff();
+    if (patch === null || patch.trim() === "") return [];
+    return [
+      `## Proposed changes`,
+      ``,
+      `Written by ${this.#peer.name}'s agent into a throwaway worktree on branch`,
+      `\`${this.#worktree!.branch}\`. Your own checkout was never touched. Read it, then apply it`,
+      `yourself if you agree.`,
+      ``,
+      "```diff",
+      patch.trim(),
+      "```",
+      ``,
+    ];
+  }
+
   #applyLedgerView(e: Envelope): void {
     for (const entry of e.ledger ?? []) {
       const current = this.#ledger.get(entry.id);
@@ -314,6 +374,7 @@ export class Conversation {
         ? `_Nothing fired._`
         : detections.map((d) => `- **${d.kind}**: ${d.because}`).join("\n"),
       ``,
+      ...(this.#patchSection()),
       `## Transcript`,
       ``,
       // Compare against our OWN fingerprint. Checking for an empty `from` was

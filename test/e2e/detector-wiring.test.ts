@@ -17,7 +17,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startRelay } from "@seshi/relay/server";
@@ -43,12 +43,14 @@ process.on("exit", () => {
  * per turn. It mimics the one measured behaviour that matters: the init event
  * is emitted at the start of a TURN, not at startup.
  */
-function fakeClaude(replies: string[]): void {
+function fakeClaude(replies: string[]): string {
   const dir = tmp("bin");
   const queue = join(dir, "queue.json");
+  const argvLog = join(dir, "argv.json");
   writeFileSync(queue, JSON.stringify(replies));
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
+fs.writeFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)));
 let turn = 0;
 let init = false;
 process.stdin.setEncoding("utf8");
@@ -82,6 +84,7 @@ process.stdin.on("data", (chunk) => {
 `;
   writeFileSync(join(dir, "claude"), script, { mode: 0o755 });
   process.env["PATH"] = `${dir}:${originalPath ?? ""}`;
+  return argvLog;
 }
 
 const BRIEF: PublicBrief = {
@@ -263,4 +266,127 @@ test("the transcript credits our turns to us and theirs to them", async (t) => {
   assert.match(md, /\*\*us\*\* `PROPOSE` mine/, "our turn must be credited to us");
   assert.match(md, /\*\*dave\*\* `COUNTER` theirs/, "their turn must be credited to them");
   assert.doesNotMatch(md, /\*\*dave\*\* `PROPOSE` mine/, "our turn must never be credited to them");
+});
+
+test("tier 3: a peer's agent writes into a throwaway worktree, and the human gets a patch", async (t) => {
+  const { execFileSync } = await import("node:child_process");
+  const { readFileSync } = await import("node:fs");
+
+  // A repo the human is working in, on their own branch, with their own edits.
+  const repo = tmp("repo");
+  const git = (...a: string[]) => execFileSync("git", a, { cwd: repo, stdio: "pipe" });
+  git("init", "-q", "-b", "main");
+  git("config", "user.email", "t@t.t");
+  git("config", "user.name", "t");
+  writeFileSync(join(repo, "handoff.md"), "# Handoff\n\nTBD\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "init");
+
+  // The peer's agent writes a file, then reports it.
+  const argvLog = fakeClaude([
+    JSON.stringify({ act: "PROPOSE", headline: "drafted the handoff spec", body: "written to handoff.md" }),
+  ]);
+
+  const relay = await startRelay({ port: 0 });
+  const jake = await SeshiNode.open({
+    home: tmp("jake3"), relayUrl: `ws://127.0.0.1:${relay.port}`, name: "jake", defaultTier: 2,
+  });
+  const dave = await SeshiNode.open({
+    home: tmp("dave3"), relayUrl: `ws://127.0.0.1:${relay.port}`, name: "dave", defaultTier: 2,
+  });
+  jake.pair(dave.invite());
+
+  const convo = jake.startConvo({ peer: "dave", mode: "build", brief: BRIEF });
+  const side = new Conversation({
+    node: jake,
+    convo,
+    peer: jake.contact("dave"),
+    scopedDir: jake.storage.convoDir(convo.id),
+    tier: 3,
+    repo,
+  });
+  t.after(async () => {
+    side.discardWorktree();
+    side.stop();
+    jake.close();
+    dave.close();
+    await relay.close();
+    process.env["PATH"] = originalPath;
+  });
+  await side.open();
+
+  // The human's checkout is untouched and still on their branch.
+  assert.equal(
+    execFileSync("git", ["branch", "--show-current"], { cwd: repo, encoding: "utf8" }).trim(),
+    "main",
+  );
+
+  const worktree = join(jake.storage.convoDir(convo.id), "worktree");
+
+  // THE BOUNDARY. The agent must be scoped to the worktree and nowhere else.
+  // Without this assertion the test passes even if --add-dir points straight at
+  // the human's checkout, which is the whole thing tier 3 exists to prevent.
+  const argv = JSON.parse(readFileSync(argvLog, "utf8")) as string[];
+  const addDir = argv[argv.indexOf("--add-dir") + 1];
+  assert.equal(addDir, worktree, "--add-dir must point at the worktree, never the human's repo");
+  assert.notEqual(addDir, repo);
+  assert.ok(argv.includes("--setting-sources") && argv.includes("user"));
+
+  // Stand in for the agent's Edit tool, which is what tier 3 permits.
+  writeFileSync(join(worktree, "handoff.md"), "# Handoff\n\nOBJ plus a JSON sidecar.\n");
+  writeFileSync(join(worktree, "sidecar.schema.json"), '{"units":"mm"}\n');
+
+  await side.openingTurn();
+
+  // The human's own files never changed.
+  assert.equal(readFileSync(join(repo, "handoff.md"), "utf8"), "# Handoff\n\nTBD\n");
+  assert.equal(existsSync(join(repo, "sidecar.schema.json")), false);
+
+  // And a patch came out, carrying both the edit and the new file.
+  const patch = side.proposedPatch();
+  assert.ok(patch !== null, "tier 3 must produce a patch");
+  assert.match(patch, /OBJ plus a JSON sidecar/);
+  assert.match(patch, /sidecar\.schema\.json/, "a new file must be in the patch, not silently dropped");
+
+  // DECISION.md carries it, so the human reads one document.
+  const md = side.writeDecision([]);
+  assert.match(md, /## Proposed changes/);
+  assert.match(md, /throwaway worktree on branch/);
+  assert.match(md, /```diff/);
+
+  // The patch applies cleanly in the human's own checkout. This is the flow.
+  const patchFile = join(repo, "peer.patch");
+  writeFileSync(patchFile, patch);
+  execFileSync("git", ["apply", patchFile], { cwd: repo, stdio: "pipe" });
+  assert.match(readFileSync(join(repo, "handoff.md"), "utf8"), /OBJ plus a JSON sidecar/);
+});
+
+test("tier 3 without a repo is refused rather than silently downgraded", async (t) => {
+  fakeClaude(["{}"]);
+  const relay = await startRelay({ port: 0 });
+  const jake = await SeshiNode.open({
+    home: tmp("jake4"), relayUrl: `ws://127.0.0.1:${relay.port}`, name: "jake", defaultTier: 2,
+  });
+  const dave = await SeshiNode.open({
+    home: tmp("dave4"), relayUrl: `ws://127.0.0.1:${relay.port}`, name: "dave", defaultTier: 2,
+  });
+  jake.pair(dave.invite());
+  t.after(async () => {
+    jake.close();
+    dave.close();
+    await relay.close();
+  });
+
+  const convo = jake.startConvo({ peer: "dave", mode: "build", brief: BRIEF });
+  assert.throws(
+    () =>
+      new Conversation({
+        node: jake,
+        convo,
+        peer: jake.contact("dave"),
+        scopedDir: jake.storage.convoDir(convo.id),
+        tier: 3,
+      }),
+    /tier 3 needs a repo/,
+  );
 });
