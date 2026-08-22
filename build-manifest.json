@@ -1,0 +1,29 @@
+{
+  "schema": 3,
+  "created_at": "2026-08-22T14:47:23.586Z",
+  "project": "/Users/jakeshelley/dev/jiffi-seshi",
+  "project_resolved_by": "fallback",
+  "business": null,
+  "signature_move": null,
+  "mcp_calls": [],
+  "mcp_failures": [],
+  "references_surveyed": [],
+  "inner_pages_viewed": [],
+  "layers_read": [],
+  "files_written": [
+    "/Users/jakeshelley/dev/jiffi-seshi/docs/superpowers/specs/2026-08-23-seshi-design.md"
+  ],
+  "files_written_outside": [],
+  "sections": [],
+  "diverge": null,
+  "converge": null,
+  "commission": null,
+  "variants": [],
+  "explore": null,
+  "visual": null,
+  "novelty": null,
+  "verifier": null,
+  "buildability": null,
+  "architecture": null,
+  "grounding": null
+}
