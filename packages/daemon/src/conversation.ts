@@ -316,8 +316,12 @@ export class Conversation {
       ``,
       `## Transcript`,
       ``,
+      // Compare against our OWN fingerprint. Checking for an empty `from` was
+      // right only while self turns went unstamped, and once they were stamped
+      // it silently credited every turn to the peer.
       ...this.#history.map(
-        (e) => `**${e.from === "" ? "us" : `${this.#peer.name} ${e.from.slice(0, 8)}`}** \`${e.act}\` ${e.headline}`,
+        (e) =>
+          `**${e.from === this.#me ? "us" : this.#peer.name}** \`${e.act}\` ${e.headline}`,
       ),
       ``,
       `---`,

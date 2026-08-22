@@ -251,3 +251,16 @@ test("a peer cannot add, delete or resurrect an issue in our ledger", async (t) 
   assert.equal(side.ledger.all().length, 2, "still just our two seeded issues");
   assert.equal(side.ledger.get("i-01")?.state, "open", "proposed -> open is legal, and it is ours to apply");
 });
+
+test("the transcript credits our turns to us and theirs to them", async (t) => {
+  const { convo, side } = await twoSides(t, [
+    JSON.stringify({ act: "PROPOSE", headline: "mine", body: "my proposal" }),
+  ]);
+  await side.openingTurn();
+  side.observe(fromPeer(convo.id, 1, { act: "COUNTER", headline: "theirs", body: "their counter" }));
+
+  const md = side.writeDecision([]);
+  assert.match(md, /\*\*us\*\* `PROPOSE` mine/, "our turn must be credited to us");
+  assert.match(md, /\*\*dave\*\* `COUNTER` theirs/, "their turn must be credited to them");
+  assert.doesNotMatch(md, /\*\*dave\*\* `PROPOSE` mine/, "our turn must never be credited to them");
+});
