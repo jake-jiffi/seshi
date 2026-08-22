@@ -321,7 +321,7 @@ export class SeshiNode {
         reason: `gap before seq ${envelope.seq}: a turn never arrived`,
       });
     }
-    chain.append(envelope);
+    chain.append(envelope, { tolerateGap: verdict === "gap" });
 
     this.storage.appendLog(envelope.convo, contact.fingerprint, envelope);
     const waiter = this.#waiters.shift();
@@ -329,11 +329,31 @@ export class SeshiNode {
     else this.#inbox.push({ envelope, contact });
   }
 
+  /**
+   * The chain for one party in one conversation, rehydrated from disk on first
+   * use.
+   *
+   * Rehydration is the whole point. seshid exits when the last client
+   * disconnects, so an in-memory-only chain forgets every turn on a normal
+   * restart and anyone holding a captured frame can replay it afterwards. The
+   * append-only log is the durable record, so the chain is derived from it.
+   */
   #chain(convoId: string, party: string): Chain {
     const key = `${convoId}/${party}`;
     let chain = this.#chains.get(key);
     if (chain === undefined) {
       chain = new Chain();
+      for (const entry of this.storage.readLog(convoId, party)) {
+        // Tolerant on the way back in: the log may already contain a gap we
+        // accepted before the restart, and refusing our own history here would
+        // wedge the conversation permanently.
+        try {
+          chain.append(entry as Envelope, { tolerateGap: true });
+        } catch {
+          // A log line that is not a well-formed turn. Skip it rather than
+          // refusing to open the conversation at all.
+        }
+      }
       this.#chains.set(key, chain);
     }
     return chain;

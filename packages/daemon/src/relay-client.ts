@@ -86,8 +86,19 @@ export class RelayClient {
       });
 
       // A transport error can carry frame bytes, so it is never logged.
+      //
+      // The handler is unconditional on purpose. An `error` event with no
+      // listener is an unhandled error in Node, and a relay closing under a
+      // client that is already connected (a normal shutdown, or a test tearing
+      // down) would print a stack trace from deep inside undici. Noise like
+      // that hides real failures, so the error is surfaced through onStatus and
+      // the socket is left to its close handler.
       socket.on("error", (err) => {
-        if (!this.connected) reject(err);
+        if (!this.connected) {
+          reject(err);
+          return;
+        }
+        this.#opts.onStatus?.("closed");
       });
     });
   }

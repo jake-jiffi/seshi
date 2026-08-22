@@ -13,6 +13,8 @@
  * depending on which agent did the folding.
  */
 
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import type { Act, Envelope } from "./envelope.ts";
 import { Ledger } from "./ledger.ts";
 
@@ -41,6 +43,18 @@ export type DetectInput = {
 };
 
 const CAPITULATION_ACTS: readonly Act[] = ["ACCEPT", "CONCEDE"];
+
+/**
+ * The hash a signature is checked against.
+ *
+ * Nothing verified this before, so `artefact.sha256` was whatever the model
+ * typed. Two agents could each write "agreed" over completely different
+ * documents and the agreement detector counted it as a shared signature. A
+ * signature that is not checked against what it signs is decoration.
+ */
+export function artefactHash(diff: string): string {
+  return bytesToHex(sha256(utf8ToBytes(diff)));
+}
 
 /** Share of a party's substantive turns that simply gave way. */
 export const CAPITULATION_LIMIT = 0.7;
@@ -85,7 +99,12 @@ function detectAgreement(input: DetectInput, parties: string[]): Detection | nul
 
   const signatures = new Map<string, string>();
   for (const e of input.history) {
-    if (e.artefact !== undefined) signatures.set(e.from, e.artefact.sha256);
+    if (e.artefact === undefined) continue;
+    // The claimed hash must actually be the hash of the diff it travels with.
+    // Otherwise "we both signed the same thing" is two agents agreeing on a
+    // string while holding different documents.
+    if (artefactHash(e.artefact.diff) !== e.artefact.sha256) continue;
+    signatures.set(e.from, e.artefact.sha256);
   }
   if (signatures.size < parties.length) return null;
   const hashes = new Set(signatures.values());
@@ -102,13 +121,40 @@ function detectAgreement(input: DetectInput, parties: string[]): Detection | nul
 function detectDegenerate(input: DetectInput, parties: string[]): Detection[] {
   const out: Detection[] = [];
 
+  // (a0) Adopting the peer's position wholesale, whatever the turn is labelled.
+  //      Relabelling a fold as PROPOSE was the cheapest way past the act-based
+  //      check, so substance is measured rather than the label.
+  for (const party of parties) {
+    const mine = input.history.filter((e) => e.from === party && e.act !== "BRIEF");
+    if (mine.length < 2) continue;
+    let adopted = 0;
+    for (const e of mine) {
+      const priorPeerTurn = lastBefore(input.history, e, (o) => o.from !== party);
+      if (priorPeerTurn === null) continue;
+      const mineFp = positionFingerprint(e);
+      // A turn with no content words has an empty fingerprint, and two empty
+      // fingerprints are equal. Without this guard every short turn reads as an
+      // adoption of every other short turn.
+      if (mineFp.split(" ").filter((w) => w !== "").length < 3) continue;
+      if (mineFp === positionFingerprint(priorPeerTurn)) adopted += 1;
+    }
+    if (adopted >= 2 && adopted / mine.length >= 0.5) {
+      out.push({
+        kind: "degenerate",
+        because: `${party} adopted the other side's position verbatim on ${adopted} of ${mine.length} turns; restating someone else's position is not agreeing with it`,
+        evidence: { party, adopted, turns: mine.length },
+      });
+    }
+  }
+
   // (a) One side simply gave way most of the time.
   for (const party of parties) {
     const turns = input.history.filter((e) => e.from === party && e.act !== "BRIEF");
     if (turns.length < 3) continue;
     const folds = turns.filter((e) => CAPITULATION_ACTS.includes(e.act)).length;
     const rate = folds / turns.length;
-    if (rate > CAPITULATION_LIMIT) {
+    // >= not >: sitting exactly on the limit was a way through.
+    if (rate >= CAPITULATION_LIMIT) {
       out.push({
         kind: "degenerate",
         because: `${party} accepted or conceded on ${Math.round(rate * 100)}% of its turns, which is agreement by exhaustion rather than by argument`,
@@ -136,11 +182,31 @@ function detectDegenerate(input: DetectInput, parties: string[]): Detection[] {
     for (const e of input.history) {
       if (e.act !== "RED_TEAM") continue;
       const concessions = named[e.from];
-      if (concessions !== undefined && concessions.length === 0) {
+      if (concessions === undefined) continue;
+      if (concessions.length === 0) {
         out.push({
           kind: "degenerate",
           because: `${e.from} red-teamed but could not name a single position it gave up or what that cost its human`,
           evidence: { party: e.from, seq: e.seq },
+        });
+        continue;
+      }
+      // A concession has to be a concession ABOUT SOMETHING. A model that
+      // cannot name a real one will happily invent a pleasant-sounding
+      // sentence, so each one must share substance with a position that was
+      // actually argued or an issue that was actually raised.
+      const argued = new Set<string>();
+      for (const t of input.history) for (const w of contentWords(`${t.headline} ${t.body}`)) argued.add(w);
+      for (const i of input.ledger.all()) for (const w of contentWords(i.text)) argued.add(w);
+
+      const unrelated = concessions.filter(
+        (c) => contentWords(c).filter((w) => argued.has(w)).length < 2,
+      );
+      if (unrelated.length === concessions.length) {
+        out.push({
+          kind: "degenerate",
+          because: `${e.from} named ${concessions.length} concession(s) but none of them reference anything that was contested; a concession unrelated to the argument is not a concession`,
+          evidence: { party: e.from, seq: e.seq, concessions },
         });
       }
     }
@@ -205,15 +271,36 @@ function detectDeadlock(input: DetectInput, parties: string[]): Detection | null
  * detectable without asking a model. Lowercased, punctuation-stripped, sorted
  * unique content words, so rephrasing the same position still matches.
  */
-export function positionFingerprint(e: Envelope): string {
-  const stop = new Set([
-    "the", "a", "an", "and", "or", "but", "so", "we", "i", "it", "is", "are", "to",
-    "of", "for", "on", "in", "that", "this", "with", "as", "be", "our", "you",
-  ]);
-  const words = `${e.headline} ${e.body}`
+/** The most recent envelope before `e` that satisfies `pred`. */
+function lastBefore(
+  history: Envelope[],
+  e: Envelope,
+  pred: (o: Envelope) => boolean,
+): Envelope | null {
+  const i = history.indexOf(e);
+  if (i <= 0) return null;
+  for (let j = i - 1; j >= 0; j -= 1) {
+    const candidate = history[j]!;
+    if (pred(candidate)) return candidate;
+  }
+  return null;
+}
+
+const STOP = new Set([
+  "the", "a", "an", "and", "or", "but", "so", "we", "i", "it", "is", "are", "to",
+  "of", "for", "on", "in", "that", "this", "with", "as", "be", "our", "you",
+  "will", "was", "have", "has", "not", "can", "his", "her", "their", "them",
+  "gave", "give", "given", "up", "which", "costs", "cost",
+]);
+
+export function contentWords(s: string): string[] {
+  return s
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !stop.has(w));
-  return [...new Set(words)].sort().join(" ");
+    .filter((w) => w.length > 2 && !STOP.has(w));
+}
+
+export function positionFingerprint(e: Envelope): string {
+  return [...new Set(contentWords(`${e.headline} ${e.body}`))].sort().join(" ");
 }

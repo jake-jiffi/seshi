@@ -75,7 +75,14 @@ export function createWorktree(opts: { repo: string; branch: string; path: strin
       // Stage everything first, including untracked files, so a NEW file the
       // agent created appears in the patch. `git diff` alone would silently
       // omit it, and a patch missing the agent's new files is worse than none.
-      git(opts.path, "add", "-A");
+      //
+      // `-f` because `add -A` honours .gitignore, so an agent writing
+      // `secret.txt` or `dist/bundle.js` into a repo that ignores them would
+      // vanish from the patch entirely and the human would review an
+      // incomplete change believing it whole. Safe here: the worktree starts
+      // from HEAD, so the only ignored files present are ones the agent just
+      // created, and the human seeing them is exactly the point.
+      git(opts.path, "add", "-A", "-f");
       return git(opts.path, "diff", "--cached", "--binary");
     },
 

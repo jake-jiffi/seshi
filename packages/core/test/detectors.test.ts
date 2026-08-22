@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Act, Envelope } from "../src/envelope.ts";
 import { Ledger } from "../src/ledger.ts";
-import { detect, positionFingerprint, CAPITULATION_LIMIT } from "../src/detectors.ts";
+import { detect, positionFingerprint, artefactHash, CAPITULATION_LIMIT } from "../src/detectors.ts";
 
 const JAKE = "a".repeat(32);
 const DAVE = "b".repeat(32);
@@ -44,20 +44,23 @@ test("agreement needs an empty ledger, both red teams, and one shared artefact h
   assert.equal(detect({ history, ledger }).some((d) => d.kind === "agreement"), false);
 
   // Only one side red-teams. Still not agreement.
-  const oneSide = [...history, turn(JAKE, "RED_TEAM", "I gave up push", "conceded latency", { artefact: { diff: "d", sha256: "HASH" } })];
+  // Hashes must genuinely cover their diff now (R2), so the fixtures use real
+  // ones. A made-up string here used to be enough, which was the defect.
+  const doc = "the agreed document";
+  const oneSide = [...history, turn(JAKE, "RED_TEAM", "I gave up push", "conceded latency", { artefact: { diff: doc, sha256: artefactHash(doc) } })];
   assert.equal(detect({ history: oneSide, ledger }).some((d) => d.kind === "agreement"), false);
 
   // Both red-team but sign DIFFERENT artefacts. Two yeses on two documents.
   const mismatched = [
     ...oneSide,
-    turn(DAVE, "RED_TEAM", "I gave up 30s", "conceded freshness", { artefact: { diff: "d2", sha256: "OTHER" } }),
+    turn(DAVE, "RED_TEAM", "I gave up 30s", "conceded freshness", { artefact: { diff: "a different document", sha256: artefactHash("a different document") } }),
   ];
   assert.equal(detect({ history: mismatched, ledger }).some((d) => d.kind === "agreement"), false);
 
   // Both red-team and sign the SAME artefact.
   const agreed = [
     ...oneSide,
-    turn(DAVE, "RED_TEAM", "I gave up 30s", "conceded freshness", { artefact: { diff: "d", sha256: "HASH" } }),
+    turn(DAVE, "RED_TEAM", "I gave up 30s", "conceded freshness", { artefact: { diff: doc, sha256: artefactHash(doc) } }),
   ];
   const found = detect({ history: agreed, ledger });
   assert.equal(found.some((d) => d.kind === "agreement"), true);
@@ -71,8 +74,8 @@ test("agreement is refused while any issue is still open", () => {
   ledger.transition("i-01", "agreed");
   const both = [
     ...history,
-    turn(JAKE, "RED_TEAM", "x", "x", { artefact: { diff: "d", sha256: "H" } }),
-    turn(DAVE, "RED_TEAM", "y", "y", { artefact: { diff: "d", sha256: "H" } }),
+    turn(JAKE, "RED_TEAM", "x", "x", { artefact: { diff: "d", sha256: artefactHash("d") } }),
+    turn(DAVE, "RED_TEAM", "y", "y", { artefact: { diff: "d", sha256: artefactHash("d") } }),
   ];
   assert.equal(detect({ history: both, ledger }).some((d) => d.kind === "agreement"), false);
 });
@@ -264,4 +267,120 @@ test("the position fingerprint survives rephrasing but not a change of position"
 
 test("detect returns nothing on an empty conversation", () => {
   assert.deepEqual(detect({ history: [], ledger: new Ledger() }), []);
+});
+
+// ---- R2: the artefact hash must be verified, not taken on trust ----
+
+test("R2: agreement is refused when the signed hash does not match the signed diff", () => {
+  const ledger = Ledger.seeded([{ id: "i-01", text: "x" }]);
+  ledger.markContested("i-01");
+  ledger.transition("i-01", "proposed");
+  ledger.transition("i-01", "agreed");
+
+  // Both sides claim the same sha256 over COMPLETELY DIFFERENT diffs. Two
+  // agents can manufacture agreement over two different documents, and a
+  // sycophantic model can just echo whatever short string it saw.
+  const history = [
+    turn(JAKE, "PROPOSE", "a"), turn(DAVE, "COUNTER", "b"),
+    turn(JAKE, "RED_TEAM", "x", "x", { artefact: { diff: "jake's document", sha256: "agreed" }, concessions: ["gave up X"] }),
+    turn(DAVE, "RED_TEAM", "y", "y", { artefact: { diff: "dave's ENTIRELY different document", sha256: "agreed" }, concessions: ["gave up Y"] }),
+  ];
+  const found = detect({ history, ledger, namedConcessions: { [JAKE]: ["gave up X"], [DAVE]: ["gave up Y"] } });
+  assert.equal(
+    found.some((d) => d.kind === "agreement"),
+    false,
+    "a hash that does not match its own diff must never count as a signature",
+  );
+});
+
+test("R2: agreement still fires when both sides genuinely sign the same document", () => {
+  const ledger = Ledger.seeded([{ id: "i-01", text: "x" }]);
+  ledger.markContested("i-01");
+  ledger.transition("i-01", "proposed");
+  ledger.transition("i-01", "agreed");
+
+  const doc = "the agreed handoff spec";
+  const hash = artefactHash(doc);
+  const history = [
+    turn(JAKE, "PROPOSE", "a"), turn(DAVE, "COUNTER", "b"),
+    turn(JAKE, "RED_TEAM", "x", "x", { artefact: { diff: doc, sha256: hash }, concessions: ["gave up X"] }),
+    turn(DAVE, "RED_TEAM", "y", "y", { artefact: { diff: doc, sha256: hash }, concessions: ["gave up Y"] }),
+  ];
+  const found = detect({ history, ledger, namedConcessions: { [JAKE]: ["gave up X"], [DAVE]: ["gave up Y"] } });
+  assert.ok(found.some((d) => d.kind === "agreement"), "a real shared signature must still count");
+});
+
+// ---- R1: folds that dodge the act label or the concession check ----
+
+test("R1: a fold labelled PROPOSE instead of ACCEPT is still caught", () => {
+  const ledger = Ledger.seeded([{ id: "i-01", text: "x" }]);
+  // Jake never advances his own position: every turn simply restates Dave's.
+  const daveLine = "we should use long poll on a thirty second interval";
+  const history = [
+    turn(DAVE, "PROPOSE", daveLine),
+    turn(JAKE, "PROPOSE", daveLine),
+    turn(DAVE, "PROPOSE", daveLine + " and metres"),
+    turn(JAKE, "EVIDENCE", daveLine + " and metres"),
+    turn(DAVE, "PROPOSE", daveLine + " and metres and quads"),
+    turn(JAKE, "PROPOSE", daveLine + " and metres and quads"),
+  ];
+  const found = detect({ history, ledger });
+  assert.ok(
+    found.some((d) => d.kind === "degenerate" && /adopt/i.test(d.because)),
+    `adopting the peer's position wholesale is a fold whatever it is labelled, got: ${JSON.stringify(found.map((d) => d.because))}`,
+  );
+});
+
+test("R1: a fold held at exactly the limit is caught", () => {
+  const ledger = Ledger.seeded([{ id: "i-01", text: "x" }]);
+  // 7 of 10 is exactly 0.7, which a strict > comparison lets through.
+  const history = [
+    ...Array.from({ length: 7 }, (_, i) => turn(JAKE, "ACCEPT", `yes ${i}`)),
+    ...Array.from({ length: 3 }, (_, i) => turn(JAKE, "ASK", `question ${i}`)),
+    turn(DAVE, "PROPOSE", "a"), turn(DAVE, "PROPOSE", "b"), turn(DAVE, "PROPOSE", "c"),
+  ];
+  const found = detect({ history, ledger });
+  assert.ok(
+    found.some((d) => d.kind === "degenerate"),
+    "sitting exactly on the limit must not be a way through",
+  );
+});
+
+test("R1: a RED_TEAM concession that names nothing from the conversation is caught", () => {
+  const ledger = Ledger.seeded([{ id: "i-01", text: "the polling interval" }]);
+  ledger.markContested("i-01");
+  const history = [
+    turn(JAKE, "PROPOSE", "poll every thirty seconds because we have no ops budget"),
+    turn(DAVE, "COUNTER", "push over websockets, fewer wasted requests"),
+    turn(JAKE, "RED_TEAM", "my red team", "arguing against this deal"),
+  ];
+  const found = detect({
+    history,
+    ledger,
+    // A concession that is real prose but concedes nothing that was ever argued.
+    namedConcessions: { [JAKE]: ["we will be extra friendly in code review"] },
+  });
+  assert.ok(
+    found.some((d) => d.kind === "degenerate" && /unrelated|nothing that was contested/i.test(d.because)),
+    `a concession must reference something actually argued, got: ${JSON.stringify(found.map((d) => d.because))}`,
+  );
+});
+
+test("R1: a concession that does reference the argument is not flagged", () => {
+  const ledger = Ledger.seeded([{ id: "i-01", text: "the polling interval" }]);
+  ledger.markContested("i-01");
+  const history = [
+    turn(JAKE, "PROPOSE", "poll every thirty seconds because we have no ops budget"),
+    turn(DAVE, "COUNTER", "push over websockets, fewer wasted requests"),
+    turn(JAKE, "RED_TEAM", "my red team", "arguing against this deal"),
+  ];
+  const found = detect({
+    history,
+    ledger,
+    namedConcessions: { [JAKE]: ["I gave up the thirty second polling interval, which costs us freshness"] },
+  });
+  assert.equal(
+    found.some((d) => d.kind === "degenerate" && /unrelated|nothing that was contested/i.test(d.because)),
+    false,
+  );
 });

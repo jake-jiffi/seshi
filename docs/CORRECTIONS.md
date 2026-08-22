@@ -134,3 +134,58 @@ pretending it is complete.
 - **The relay's `hello` is unauthenticated.** Squatting a fingerprint can swallow queued frames. It
   cannot read them (no private key) or forge them (signatures verify at the receiver). Fix is a
   signed challenge at connect.
+
+## C7. Second adversarial review: six more, five fixed, one design pass
+
+### R2 — false agreement from an unverified hash (fixed)
+`agreement` required "both signed the same artefact hash", but the hash was whatever the model typed
+and nothing checked it against the diff it travelled with. Two agents could each write `sha256:
+"agreed"` over **completely different documents** and it counted as a shared signature. `artefactHash()`
+now recomputes over the diff and a mismatch is not a signature.
+
+### R3 — the replay fix crashed the daemon (fixed)
+`#deliver` recorded a gap and then called `chain.append()`, which throws on any non-`ok` verdict. The
+throw was uncaught, so it propagated out of the ws message handler and killed `seshid`, and the turn
+was never delivered despite the comment saying otherwise. Reachable **without an attacker**: the relay
+drops the oldest frame on queue overflow, so a queue overflow produced a gap and a crash on reconnect.
+`append()` now takes `tolerateGap`. A fork is still never tolerated.
+
+### R4 — replay protection did not survive a restart (fixed)
+Chains were in-memory only, and the daemon exits when the last client disconnects, which is the normal
+lifecycle. Anyone holding a captured frame could replay it after the next restart. Chains are now
+rehydrated from the append-only log on first use.
+
+### R5 — the proposed patch silently dropped ignored files (fixed)
+`git add -A` honours `.gitignore`, so any file the agent created matching an ignore rule vanished from
+the patch. A human would review an incomplete change and apply it believing it whole. Now `add -A -f`,
+which is safe because the worktree starts from HEAD, so the only ignored files present are ones the
+agent just created and seeing them is the point.
+
+### R6 — a stay-green test gap (fixed)
+Replacing the `convo.peer === contact.fingerprint` participant check with `if (false)` left the whole
+247-test suite green. The check was right; nothing guarded it. Now tested.
+
+### R1 — folds were still evadable. This one needed a design pass, not a patch.
+Three separate holes:
+- **The act label was the whole signal.** A fold labelled `PROPOSE` or `EVIDENCE` scored zero. There is
+  now an adoption detector that compares position fingerprints: restating the other side's position
+  verbatim is a fold whatever the turn is called. (Guarded against empty fingerprints, which otherwise
+  match each other and flag every short turn.)
+- **The limit was strictly greater-than.** Exactly 7/10 slipped through. Now `>=`.
+- **A concession was any non-empty string.** "we will be extra friendly in code review" passed. A
+  concession must now share substance with something actually argued or an issue actually raised.
+- **The CLI seeded an empty ledger** (`nonNegotiables: []`), which made the whole seeded-conflict arm
+  structurally dead *in the shipped product* while the tests passed because their fixtures had
+  non-negotiables. The CLI now seeds the objective as an issue and **says out loud** that convergence
+  detection is weaker without a real brief.
+
+**Honest residual:** a determined model can still fold in a way no local heuristic catches. These
+detectors raise the cost and make the common cases visible. They are not a proof of good faith, and
+the artefact says what fired rather than claiming a conversation was sound.
+
+### Also fixed
+- Tier 3 was unreachable from the CLI (`talk()` never passed `repo`). Now passes the cwd and says so.
+- The CLI's final `writeDecision` called a bare `detect()` without `namedConcessions` or the ledger
+  trail, so the written report was weaker than the live one. Now uses `detections()`.
+- An unhandled `error` event on a connected WebSocket printed an undici stack trace on teardown.
+  Unhandled errors hide real ones.

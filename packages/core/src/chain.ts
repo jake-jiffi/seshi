@@ -94,8 +94,22 @@ export class Chain {
    * accepted a gap or a fork would move its own expectation on to the bad turn
    * and never report the break again.
    */
-  append(e: Envelope): void {
+  /**
+   * Add a turn.
+   *
+   * `tolerateGap` exists because a gap is not the peer's fault and not a
+   * security event: the relay drops the oldest frame on queue overflow, so a
+   * gap is a normal consequence of one side being offline too long. Refusing to
+   * append one wedged the chain and, because the throw was uncaught, took the
+   * daemon down with it. A fork is different and is never tolerated.
+   */
+  append(e: Envelope, opts: { tolerateGap?: boolean } = {}): void {
     const verdict = this.verify(e);
+    if (verdict === "gap" && opts.tolerateGap === true) {
+      this.log.push(e);
+      this.head = envelopeHash(e);
+      return;
+    }
     if (verdict !== "ok") {
       const want = this.expectedNext();
       throw new Error(

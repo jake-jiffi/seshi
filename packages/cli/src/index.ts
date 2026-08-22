@@ -12,7 +12,6 @@ import { join } from "node:path";
 import { SeshiNode } from "@seshi/daemon/node";
 import { Conversation } from "@seshi/daemon/conversation";
 import { startRelay } from "@seshi/relay/server";
-import { detect } from "@seshi/core/detectors";
 import type { Envelope } from "@seshi/core/envelope";
 
 const HOME = process.env["SESHI_HOME"] ?? join(homedir(), ".seshi");
@@ -187,18 +186,42 @@ async function talk(node: SeshiNode, who: string, mode: string, objective: strin
     return 1;
   }
 
-  const convo = node.startConvo({
-    peer: peer.fingerprint,
-    mode,
-    brief: { objective, definitionOfDone: [], nonNegotiables: [], facts: [] },
-  });
+  // A brief with no non-negotiables seeds an EMPTY ledger, and an empty ledger
+  // makes half the convergence machinery structurally dead: nothing can be
+  // "agreed uncontested" if nothing was ever seeded, and `agreement` reduces to
+  // a trivially-true open-count check. So the objective itself becomes the
+  // first issue. It is a weak brief and seshi says so rather than pretending.
+  const brief = {
+    objective,
+    definitionOfDone: [`both sides sign one decision on: ${objective}`],
+    nonNegotiables: [{ text: objective, reason: "stated as the point of this conversation" }],
+    facts: [],
+  };
+  process.stdout.write(
+    `  note: no non-negotiables given, so the objective itself is the only seeded issue.\n` +
+      `  Convergence detection is weaker without a real brief.\n`,
+  );
 
+  const convo = node.startConvo({ peer: peer.fingerprint, mode, brief });
+
+  // Tier 3 writes, so it needs a repo to cut a throwaway worktree from. The
+  // current directory is the honest default: it is the repo the human is
+  // standing in when they start the conversation.
   const side = new Conversation({
     node,
     convo,
     peer,
     scopedDir: node.storage.convoDir(convo.id),
+    ...(peer.tier === 3 ? { repo: process.cwd() } : {}),
   });
+  if (peer.tier === 3) {
+    process.stdout.write(
+      `  tier 3: their agent may PROPOSE writes into a throwaway worktree cut from
+` +
+        `  ${process.cwd()}. Your checkout is not touched. You get a patch.
+`,
+    );
+  }
 
   process.stdout.write(`\n  ${mode} with ${peer.name} · ${convo.id}\n`);
   process.stdout.write(`  ${objective}\n\n  starting their agent...\n`);
@@ -209,12 +232,13 @@ async function talk(node: SeshiNode, who: string, mode: string, objective: strin
   await node.send(convo.id, opening);
 
   const stop = () => {
+    side.discardWorktree();
     side.stop();
     node.close();
   };
   process.on("SIGINT", () => {
     process.stdout.write("\n  interrupted. writing what we have.\n");
-    side.writeDecision(detect({ history: [...side.history], ledger: side.ledger }));
+    side.writeDecision(side.detections());
     stop();
     process.exit(0);
   });
@@ -240,7 +264,9 @@ async function talk(node: SeshiNode, who: string, mode: string, objective: strin
     if (reply.act === "CLOSE") break;
   }
 
-  side.writeDecision(detect({ history: [...side.history], ledger: side.ledger }));
+  // detections(), not a bare detect(): the live loop feeds namedConcessions and
+  // the ledger trail, and the final report must not be weaker than the running one.
+  side.writeDecision(side.detections());
   process.stdout.write(`\n  budget spent. written to convos/${convo.id}/DECISION.md\n`);
   stop();
   return 0;

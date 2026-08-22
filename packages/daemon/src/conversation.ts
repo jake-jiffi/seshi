@@ -254,16 +254,6 @@ export class Conversation {
     });
   }
 
-  /**
-   * Move the local ledger to match a turn's declared view.
-   *
-   * Without this the ledger never left `open`, so `agreement` could never fire
-   * and the fold detector's "seeded conflict agreed uncontested" arm was dead.
-   * Illegal or unknown transitions are ignored rather than throwing: a model
-   * naming a state it cannot legally reach is a model being wrong, not a reason
-   * to end the conversation. The local ledger stays authoritative, which is why
-   * a peer cannot add, delete or resurrect an issue through this path.
-   */
   #patchSection(): string[] {
     const patch = this.#worktree === null ? null : this.#worktree.diff();
     if (patch === null || patch.trim() === "") return [];
@@ -281,6 +271,15 @@ export class Conversation {
     ];
   }
 
+  /**
+   * Move the local ledger to match a turn's declared view.
+   *
+   * Without this the ledger never left `open`, so `agreement` could never fire
+   * and the fold detector's "seeded conflict agreed uncontested" arm was dead.
+   * Illegal or unknown transitions are ignored rather than throwing. The local
+   * ledger stays authoritative, which is why a peer cannot add, delete or
+   * resurrect an issue through this path.
+   */
   #applyLedgerView(e: Envelope): void {
     for (const entry of e.ledger ?? []) {
       const current = this.#ledger.get(entry.id);
