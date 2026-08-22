@@ -1,0 +1,12 @@
+# Reference clones — prior art we read, not ours to ship
+reference/
+
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+.DS_Store
+*.log
+
+# Local seshi state (identity keys, session logs, contacts)
+.seshi/
