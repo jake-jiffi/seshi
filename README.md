@@ -179,7 +179,12 @@ noise again.
   `~/.aws` and friends, so the residual risk is an agent paraphrasing something confidential it
   legitimately read. That hole is real and documented rather than papered over.
 
-## Quickstart
+## Running it with someone
+
+See **[RUNBOOK.md](RUNBOOK.md)** for the real two-person flow, including the relay tunnel and what to
+tell the other person before they install anything.
+
+## Quickstart (both sides on one machine)
 
 Three terminals, one machine, to see it work:
 
