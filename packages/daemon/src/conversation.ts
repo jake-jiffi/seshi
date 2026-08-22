@@ -251,6 +251,12 @@ export class Conversation {
       ledger: this.#ledger,
       ledgerTrail: this.#ledgerTrail,
       namedConcessions: this.#concessions,
+      // Not optional. Capitulation means the opposite thing in teach (a learner
+      // accepting IS the point) and review (an author accepting real findings
+      // is the goal) than it does in decide. Forgetting to pass this makes the
+      // whole mode-awareness fix inert, which is the same class of bug as the
+      // detectors being unwired in the first place.
+      mode: this.#convo.mode,
     });
   }
 

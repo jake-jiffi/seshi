@@ -40,6 +40,14 @@ export type DetectInput = {
    * gave up, which is the third fold signal.
    */
   namedConcessions?: Record<string, string[]>;
+  /**
+   * The conversation's mode. Not optional in spirit: capitulation means
+   * something completely different in teach (a learner accepting is the
+   * point) and review (an author accepting real findings is the goal) than
+   * it does in decide, where an advocate who never argues has stopped
+   * advocating. Defaults to decide, the strict reading.
+   */
+  mode?: string;
 };
 
 const CAPITULATION_ACTS: readonly Act[] = ["ACCEPT", "CONCEDE"];
@@ -53,7 +61,30 @@ const CAPITULATION_ACTS: readonly Act[] = ["ACCEPT", "CONCEDE"];
  * signature that is not checked against what it signs is decoration.
  */
 export function artefactHash(diff: string): string {
-  return bytesToHex(sha256(utf8ToBytes(diff)));
+  return bytesToHex(sha256(utf8ToBytes(canonicaliseArtefact(diff))));
+}
+
+/**
+ * Two sides produce their artefact independently, so byte equality is the wrong
+ * test: a trailing newline, CRLF, or trailing whitespace blocked agreement
+ * entirely. Verifying the hash was right; demanding identical bytes was not,
+ * and it turned a false positive into a false negative that would have meant
+ * `agreement` essentially never fired.
+ *
+ * This still does not solve the harder case: a real `git diff` embeds
+ * `index <blob>..<blob>` lines that depend on each person's base tree, so two
+ * independently generated diffs of the same change are never equal however they
+ * are normalised. The real fix is one side proposing exact artefact bytes and
+ * the other echoing those same bytes, which is a protocol change and is noted
+ * in the README as an open gap rather than pretended away here.
+ */
+export function canonicaliseArtefact(diff: string): string {
+  return diff
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/, ""))
+    .join("\n")
+    .trim();
 }
 
 /** Share of a party's substantive turns that simply gave way. */
@@ -121,34 +152,15 @@ function detectAgreement(input: DetectInput, parties: string[]): Detection | nul
 function detectDegenerate(input: DetectInput, parties: string[]): Detection[] {
   const out: Detection[] = [];
 
-  // (a0) Adopting the peer's position wholesale, whatever the turn is labelled.
-  //      Relabelling a fold as PROPOSE was the cheapest way past the act-based
-  //      check, so substance is measured rather than the label.
-  for (const party of parties) {
-    const mine = input.history.filter((e) => e.from === party && e.act !== "BRIEF");
-    if (mine.length < 2) continue;
-    let adopted = 0;
-    for (const e of mine) {
-      const priorPeerTurn = lastBefore(input.history, e, (o) => o.from !== party);
-      if (priorPeerTurn === null) continue;
-      const mineFp = positionFingerprint(e);
-      // A turn with no content words has an empty fingerprint, and two empty
-      // fingerprints are equal. Without this guard every short turn reads as an
-      // adoption of every other short turn.
-      if (mineFp.split(" ").filter((w) => w !== "").length < 3) continue;
-      if (mineFp === positionFingerprint(priorPeerTurn)) adopted += 1;
-    }
-    if (adopted >= 2 && adopted / mine.length >= 0.5) {
-      out.push({
-        kind: "degenerate",
-        because: `${party} adopted the other side's position verbatim on ${adopted} of ${mine.length} turns; restating someone else's position is not agreeing with it`,
-        evidence: { party, adopted, turns: mine.length },
-      });
-    }
-  }
-
   // (a) One side simply gave way most of the time.
-  for (const party of parties) {
+  //
+  //     Only in decide and build. In teach the learner is supposed to accept,
+  //     and in review the author accepting valid findings is the goal. Running
+  //     this arm there flags the healthiest possible conversation, and a
+  //     detector the human learns to ignore costs you every real detection.
+  const mode = input.mode ?? "decide";
+  const capitulationApplies = mode === "decide" || mode === "build";
+  for (const party of capitulationApplies ? parties : []) {
     const turns = input.history.filter((e) => e.from === party && e.act !== "BRIEF");
     if (turns.length < 3) continue;
     const folds = turns.filter((e) => CAPITULATION_ACTS.includes(e.act)).length;
@@ -191,24 +203,13 @@ function detectDegenerate(input: DetectInput, parties: string[]): Detection[] {
         });
         continue;
       }
-      // A concession has to be a concession ABOUT SOMETHING. A model that
-      // cannot name a real one will happily invent a pleasant-sounding
-      // sentence, so each one must share substance with a position that was
-      // actually argued or an issue that was actually raised.
-      const argued = new Set<string>();
-      for (const t of input.history) for (const w of contentWords(`${t.headline} ${t.body}`)) argued.add(w);
-      for (const i of input.ledger.all()) for (const w of contentWords(i.text)) argued.add(w);
-
-      const unrelated = concessions.filter(
-        (c) => contentWords(c).filter((w) => argued.has(w)).length < 2,
-      );
-      if (unrelated.length === concessions.length) {
-        out.push({
-          kind: "degenerate",
-          because: `${e.from} named ${concessions.length} concession(s) but none of them reference anything that was contested; a concession unrelated to the argument is not a concession`,
-          evidence: { party: e.from, seq: e.seq, concessions },
-        });
-      }
+      // Whether a NAMED concession is genuine is a semantic judgement, and
+      // lexical overlap is the wrong instrument for it: a real concession is
+      // routinely stated as an abstraction ("I dropped my latency
+      // requirement" when the argument said "freshness"), which shares no
+      // words with the transcript and got flagged as fake. Meanwhile any
+      // pleasant sentence reusing two words passed. Only the ABSENCE of a
+      // concession is a signal we can read honestly, so that is all we read.
     }
   }
 

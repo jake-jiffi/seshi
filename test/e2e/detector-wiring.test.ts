@@ -390,3 +390,46 @@ test("tier 3 without a repo is refused rather than silently downgraded", async (
     /tier 3 needs a repo/,
   );
 });
+
+test("mode actually reaches the detectors, so a teach learner is not flagged as folding", async (t) => {
+  // The mode-awareness fix is inert unless Conversation passes mode through.
+  // That is the same class of bug as the detectors being unwired at all, so it
+  // gets a test that drives the real path rather than calling detect() directly.
+  const accept = JSON.stringify({ act: "ACCEPT", headline: "understood", body: "that makes sense to me" });
+  fakeClaude([accept, accept, accept, accept]);
+
+  const relay = await startRelay({ port: 0 });
+  const jake = await SeshiNode.open({
+    home: tmp("jaketeach"), relayUrl: `ws://127.0.0.1:${relay.port}`, name: "jake", defaultTier: 2,
+  });
+  const dave = await SeshiNode.open({
+    home: tmp("daveteach"), relayUrl: `ws://127.0.0.1:${relay.port}`, name: "dave", defaultTier: 2,
+  });
+  jake.pair(dave.invite());
+  t.after(async () => {
+    jake.close(); dave.close(); await relay.close();
+    process.env["PATH"] = originalPath;
+  });
+
+  const convo = jake.startConvo({ peer: "dave", mode: "teach", brief: BRIEF });
+  const side = new Conversation({
+    node: jake, convo, peer: jake.contact("dave"),
+    scopedDir: jake.storage.convoDir(convo.id), tier: 2,
+  });
+  t.after(() => side.stop());
+  await side.open();
+
+  await side.openingTurn();
+  for (let i = 0; i < 3; i += 1) {
+    const inbound = fromPeer(convo.id, i + 1, { act: "EVIDENCE", headline: `lesson ${i}`, body: `here is how I do step ${i}` });
+    side.observe(inbound);
+    await side.replyTo(inbound);
+  }
+
+  const found = side.detections();
+  assert.equal(
+    found.filter((d) => d.kind === "degenerate").length,
+    0,
+    `a teach learner accepting what it is taught must not be flagged: ${JSON.stringify(found.map((d) => d.because))}`,
+  );
+});

@@ -121,9 +121,11 @@ test("a couple of accepts in a long argued conversation is not a fold", () => {
 // ---- degenerate (b): seeded conflict agreed uncontested ----
 
 test("degenerate fires when a seeded conflict is agreed without ever being contested", () => {
+  // Both marked opposed: the briefs genuinely disagreed. Without that, two
+  // people happening to agree on a shared topic reads as a fold.
   const ledger = Ledger.seeded([
-    { id: "i-01", text: "push or poll" },
-    { id: "i-02", text: "who owns retries" },
+    { id: "i-01", text: "push or poll", opposed: true },
+    { id: "i-02", text: "who owns retries", opposed: true },
   ]);
   ledger.markContested("i-01");
   ledger.transition("i-01", "proposed");
@@ -312,22 +314,28 @@ test("R2: agreement still fires when both sides genuinely sign the same document
 
 // ---- R1: folds that dodge the act label or the concession check ----
 
-test("R1: a fold labelled PROPOSE instead of ACCEPT is still caught", () => {
-  const ledger = Ledger.seeded([{ id: "i-01", text: "x" }]);
-  // Jake never advances his own position: every turn simply restates Dave's.
-  const daveLine = "we should use long poll on a thirty second interval";
+test("KNOWN GAP: a fold that avoids ACCEPT/CONCEDE in decide mode is NOT caught", () => {
+  // An adoption detector used to catch this by comparing position fingerprints.
+  // It was DELETED, and deliberately: it fired on a teach learner honestly
+  // restating a method (which teach mode explicitly instructs) and it missed
+  // any fold that paraphrased, because the fingerprint is set-equality over
+  // content words. It caught the wrong direction.
+  //
+  // This test exists so the gap is recorded rather than forgotten. If it ever
+  // starts failing, someone has found a better instrument, and that is good
+  // news that should be reviewed rather than a regression.
+  const ledger = Ledger.seeded([{ id: "i-01", text: "x", opposed: true }]);
+  const line = "we should use long poll on a thirty second interval";
   const history = [
-    turn(DAVE, "PROPOSE", daveLine),
-    turn(JAKE, "PROPOSE", daveLine),
-    turn(DAVE, "PROPOSE", daveLine + " and metres"),
-    turn(JAKE, "EVIDENCE", daveLine + " and metres"),
-    turn(DAVE, "PROPOSE", daveLine + " and metres and quads"),
-    turn(JAKE, "PROPOSE", daveLine + " and metres and quads"),
+    turn(DAVE, "PROPOSE", line),
+    turn(JAKE, "PROPOSE", line),
+    turn(DAVE, "PROPOSE", line + " and metres"),
+    turn(JAKE, "EVIDENCE", line + " and metres"),
   ];
-  const found = detect({ history, ledger });
-  assert.ok(
-    found.some((d) => d.kind === "degenerate" && /adopt/i.test(d.because)),
-    `adopting the peer's position wholesale is a fold whatever it is labelled, got: ${JSON.stringify(found.map((d) => d.because))}`,
+  assert.equal(
+    detect({ history, ledger, mode: "decide" }).some((d) => d.kind === "degenerate"),
+    false,
+    "recorded gap: relabelled folds are not detected",
   );
 });
 
@@ -346,27 +354,32 @@ test("R1: a fold held at exactly the limit is caught", () => {
   );
 });
 
-test("R1: a RED_TEAM concession that names nothing from the conversation is caught", () => {
-  const ledger = Ledger.seeded([{ id: "i-01", text: "the polling interval" }]);
+test("KNOWN GAP: a plausible but fake concession is NOT caught", () => {
+  // A relatedness check (>= 2 content words shared with the transcript) used to
+  // flag these. It was DELETED because it flagged GENUINE concessions phrased as
+  // abstractions or synonyms, which is how people actually state them, while any
+  // pleasant sentence reusing two words sailed through. Lexical overlap is the
+  // wrong instrument for a semantic property.
+  //
+  // Only the ABSENCE of a concession is a signal we can read honestly.
+  const ledger = Ledger.seeded([{ id: "i-01", text: "the polling interval", opposed: true }]);
   ledger.markContested("i-01");
   const history = [
     turn(JAKE, "PROPOSE", "poll every thirty seconds because we have no ops budget"),
     turn(DAVE, "COUNTER", "push over websockets, fewer wasted requests"),
     turn(JAKE, "RED_TEAM", "my red team", "arguing against this deal"),
   ];
-  const found = detect({
-    history,
-    ledger,
-    // A concession that is real prose but concedes nothing that was ever argued.
-    namedConcessions: { [JAKE]: ["we will be extra friendly in code review"] },
-  });
-  assert.ok(
-    found.some((d) => d.kind === "degenerate" && /unrelated|nothing that was contested/i.test(d.because)),
-    `a concession must reference something actually argued, got: ${JSON.stringify(found.map((d) => d.because))}`,
+  assert.equal(
+    detect({
+      history, ledger, mode: "decide",
+      namedConcessions: { [JAKE]: ["we will be extra friendly in code review"] },
+    }).some((d) => d.kind === "degenerate"),
+    false,
+    "recorded gap: a fake but plausible concession passes",
   );
 });
 
-test("R1: a concession that does reference the argument is not flagged", () => {
+test("a concession that references the argument is not flagged", () => {
   const ledger = Ledger.seeded([{ id: "i-01", text: "the polling interval" }]);
   ledger.markContested("i-01");
   const history = [

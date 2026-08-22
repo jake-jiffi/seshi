@@ -101,9 +101,11 @@ test("openCount counts only non-terminal issues", () => {
 });
 
 test("seeded issues are marked, and uncontested seeded agreements are findable", () => {
+  // opposed: the briefs genuinely disagreed on both. A merely shared topic is
+  // not a contest, so an uncontested agreement on one is not a fold.
   const l = Ledger.seeded([
-    { id: "i-01", text: "push or poll" },
-    { id: "i-02", text: "who owns retries" },
+    { id: "i-01", text: "push or poll", opposed: true },
+    { id: "i-02", text: "who owns retries", opposed: true },
   ]);
   l.add("i-03", "raised mid-conversation");
 
@@ -147,4 +149,15 @@ test("toEntries produces the compact wire form", () => {
   l.add("i-01", "x");
   l.transition("i-01", "proposed");
   assert.deepEqual(l.toEntries(), [{ id: "i-01", state: "proposed" }]);
+});
+
+test("a seeded issue the briefs merely shared, agreed uncontested, is not reported as a fold", () => {
+  const l = Ledger.seeded([{ id: "i-01", text: "the sidecar format" }]); // not opposed
+  l.transition("i-01", "proposed");
+  l.transition("i-01", "agreed");
+  assert.deepEqual(
+    l.uncontestedSeededAgreements(),
+    [],
+    "two people happening to agree on a shared topic is not a fold",
+  );
 });

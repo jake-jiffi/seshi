@@ -24,6 +24,12 @@ export type IssueRecord = {
   reason?: string;
   /** Set when the issue was seeded from the two briefs at turn zero. */
   seeded: boolean;
+  /**
+   * The two briefs stated genuinely OPPOSING positions on this, not merely
+   * the same topic. The conflict set is a heuristic guess and over-includes,
+   * so only real opposition counts as something that had to be argued.
+   */
+  opposed: boolean;
   history: Array<{ from: LedgerState; to: LedgerState; at: number; reason?: string }>;
 };
 
@@ -49,13 +55,13 @@ export class Ledger {
   #clock = 0;
 
   /** Seed the ledger from the conflict set computed off the two briefs. */
-  static seeded(items: Array<{ id: string; text: string }>): Ledger {
+  static seeded(items: Array<{ id: string; text: string; opposed?: boolean }>): Ledger {
     const l = new Ledger();
-    for (const i of items) l.add(i.id, i.text, { seeded: true });
+    for (const i of items) l.add(i.id, i.text, { seeded: true, opposed: i.opposed ?? false });
     return l;
   }
 
-  add(id: string, text: string, opts: { seeded?: boolean } = {}): IssueRecord {
+  add(id: string, text: string, opts: { seeded?: boolean; opposed?: boolean } = {}): IssueRecord {
     if (this.#issues.has(id)) throw new Error(`issue ${id} already exists`);
     if (id === "") throw new Error("an issue needs an id");
     const record: IssueRecord = {
@@ -64,6 +70,7 @@ export class Ledger {
       state: "open",
       contested: false,
       seeded: opts.seeded ?? false,
+      opposed: opts.opposed ?? false,
       history: [],
     };
     this.#issues.set(id, record);
@@ -121,9 +128,16 @@ export class Ledger {
     return [...this.#issues.values()].map((r) => ({ ...r, history: [...r.history] }));
   }
 
-  /** Seeded issues that reached `agreed` without ever being contested. */
+  /**
+   * Issues the two briefs genuinely disagreed about that reached `agreed`
+   * without anyone ever arguing them.
+   *
+   * `opposed` is load-bearing. Without it, two people happening to agree on a
+   * shared topic read as a fold, which is a false alarm on one of the most
+   * common healthy shapes there is.
+   */
   uncontestedSeededAgreements(): IssueRecord[] {
-    return this.all().filter((r) => r.seeded && r.state === "agreed" && !r.contested);
+    return this.all().filter((r) => r.seeded && r.opposed && r.state === "agreed" && !r.contested);
   }
 
   /** The compact form that rides on an envelope. */

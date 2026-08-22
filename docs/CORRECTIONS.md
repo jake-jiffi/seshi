@@ -189,3 +189,66 @@ the artefact says what fired rather than claiming a conversation was sound.
   trail, so the written report was weaker than the live one. Now uses `detections()`.
 - An unhandled `error` event on a connected WebSocket printed an undici stack trace on teardown.
   Unhandled errors hide real ones.
+
+## C8. Third review: the detectors were false-positive heavy. Three now, not four.
+
+The third adversarial pass attacked the new heuristics for FALSE POSITIVES rather than evasion, and
+that was the right question: **five of eight hand-built healthy conversations fired a spurious fold**,
+across all four arms. A detector the human learns to ignore costs you every real detection, which is
+the bar this project set for itself.
+
+(The 5/8 is hand-authored transcripts, not live-model traffic. Read it as "these healthy shapes
+misfire", not as a rate.)
+
+### The adoption detector is DELETED, not tuned
+
+I added it in C7 to catch folds that dodge the act label. It was the wrong instrument in both
+directions:
+
+- It fired on a **teach learner restating the method to confirm understanding**, which is the
+  behaviour teach mode explicitly instructs. It punished the instruction.
+- It was **defeated by paraphrase**: "poll every thirty seconds" → "survey on a half-minute cadence"
+  produces a disjoint fingerprint and sails through.
+
+It caught honest echoing and missed the rephrased sycophant. Deleted. The gap is now recorded as a
+passing test named `KNOWN GAP: a fold that avoids ACCEPT/CONCEDE in decide mode is NOT caught`, so it
+is visible rather than forgotten.
+
+### Capitulation is now mode-aware
+
+`detect()` took no mode, so it could not tell an advocate folding from a learner learning. Measured
+false positives: a teach learner at 75% ACCEPT, and a review author accepting three real findings at
+100%. Both are the healthiest possible version of their mode. The arm now runs only in `decide` and
+`build`, and `Conversation` passes `mode` through (with its own red-green test, because a fix that
+never reaches the caller is the exact bug the first review found).
+
+### Seeded-conflict needs real opposition
+
+The conflict set is a heuristic guess off two briefs and over-includes. Requiring every seeded item to
+receive a COUNTER before it may be agreed treated "we happened to agree" as a fold. Issues now carry
+`opposed`, and only genuinely opposing brief positions count.
+
+### Concession relatedness is DELETED
+
+Requiring ≥2 shared content words flagged **genuine** concessions stated as abstractions ("I dropped
+my latency requirement" when the debate said "freshness"), while any pleasant sentence reusing two
+words passed. Lexical overlap is the wrong instrument for a semantic property. Only the ABSENCE of a
+concession is a signal we can read honestly, so that is all we read. Recorded as
+`KNOWN GAP: a plausible but fake concession is NOT caught`.
+
+### The C7 hash fix had made agreement a false NEGATIVE
+
+Verifying the hash was right; demanding identical bytes was not. Two sides generate artefacts
+independently, so a trailing newline or CRLF blocked agreement entirely. `canonicaliseArtefact`
+normalises line endings and trailing whitespace before hashing.
+
+**Still unsolved, and stated rather than hidden:** a real `git diff` embeds `index <blob>..<blob>`
+lines that depend on each person's base tree, so two independently produced diffs of the same logical
+change are never equal however they are normalised. The real fix is one side proposing exact artefact
+bytes and the other echoing those bytes. That is a protocol change and it is not done.
+
+### The standing rule this establishes
+
+Ship three detectors that work over four where one cries wolf. `packages/core/test/detectors-false-positives.test.ts`
+is the specification for what "healthy" looks like; anything in it that starts failing means a
+detector has become noise.
