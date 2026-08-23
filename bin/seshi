@@ -9,8 +9,13 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
 
-# Installed as a plugin the CLI sits beside us; in a git clone it is one up.
-for candidate in "$ROOT/packages/cli/src/index.ts" "$(dirname "$ROOT")/packages/cli/src/index.ts"; do
+# The repo root IS the plugin, so packages/ ships with it and sits one level up
+# from bin/. The extra candidates cover a plugin cache that nests the version,
+# and anyone running this straight out of a clone.
+for candidate in \
+  "$ROOT/packages/cli/src/index.ts" \
+  "$(dirname "$ROOT")/packages/cli/src/index.ts" \
+  "$CLAUDE_PLUGIN_ROOT/packages/cli/src/index.ts"; do
   [ -f "$candidate" ] && CLI="$candidate" && break
 done
 

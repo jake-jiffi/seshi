@@ -7,7 +7,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
-const pluginRoot = join(repoRoot, "plugin");
+// The repo root IS the plugin now, so packages/ ships inside it and the
+// launcher can find the CLI. A nested plugin/ directory left packages/
+// behind at install time, which is how this was found.
+const pluginRoot = repoRoot;
 const manifestPath = join(pluginRoot, ".claude-plugin", "plugin.json");
 const hookPath = join(pluginRoot, "hooks", "session-start.sh");
 const skillPath = join(pluginRoot, "skills", "seshi", "SKILL.md");
