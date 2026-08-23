@@ -5,7 +5,7 @@ Five slash commands. Everything else is conversational or inferred.
 | Surface | Why |
 |---|---|
 | `/seshi [free text]` | The front door. Bare, it prints live and recent sessions. With text ("talk to Dave about the 2d-to-3d skill"), it creates a session, infers mode and title, elicits the brief, and stops at the invite. |
-| `/seshi:invite [who]` | Renders the paste block. Deliberately its own command because this is the moment Jake leaves the terminal and enters Slack. |
+| `/seshi:invite [who]` | Renders the paste block. Deliberately its own command because this is the moment Jake leaves the terminal and enters a connector. |
 | `/seshi:join <code>` | Dave's whole entry point. |
 | `/seshi:resume [fuzzy text]` | Finds and rehydrates. Text is optional and fuzzy: "the thing with Dave about textures". |
 | `/seshi:end [why]` | Rare, because normal termination is the two agents agreeing. This is the abort. |
@@ -113,11 +113,11 @@ Then:  /seshi:join 7-crossover-clockwork
 
 Format is nameplate plus two words from a phonetically distinct wordlist, lifted directly from Magic Wormhole because that shape is already proven for humans reading codes to each other. Three words for `/seshi:invite --sensitive`.
 
-**Why not a URL.** A URL implies a host to click, and constraint (j) says there is no service. A URL also unfurls in Slack, gets link-previewed by three bots, and looks like a credential you should not have pasted. A code reads as an invitation.
+**Why not a URL.** A URL implies a host to click, and constraint (j) says there is no service. A URL also unfurls in a connector, gets link-previewed by three bots, and looks like a credential you should not have pasted. A code reads as an invitation.
 
 **Why not a file.** Files get forwarded, and they do not expire in anybody's head.
 
-**What it carries.** Nothing. That is the point. The code is a SPAKE2 password, not a key and not a payload. Session id, connection info and the shared frame all cross after the pairing succeeds, encrypted under a key neither side transmitted. So the string in Slack is not a secret that leaks, it is a secret that can be guessed once.
+**What it carries.** Nothing. That is the point. The code is a SPAKE2 password, not a key and not a payload. Session id, connection info and the shared frame all cross after the pairing succeeds, encrypted under a key neither side transmitted. So the string in a connector is not a secret that leaks, it is a secret that can be guessed once.
 
 - **Expiry:** 24 hours. Tailscale uses 30 days for network membership, which is the wrong analogy; this is a conversation invitation, and if Dave has not joined by tomorrow Jake will re-send.
 - **Uses:** single. This is load-bearing, not a nicety. Single use is what caps an attacker at one guess per invite, and it is what makes a failed guess loud rather than silent.
@@ -126,7 +126,7 @@ Format is nameplate plus two words from a phonetically distinct wordlist, lifted
 
 ## 4. Dave's join, literally
 
-> **Slack, 9:14am.** Jake: *"got my claude to write up the retopo stuff, easier if yours just talks to mine. one sec"*
+> **a connector, 9:14am.** Jake: *"got my claude to write up the retopo stuff, easier if yours just talks to mine. one sec"*
 >
 > ```
 > seshi 7-crossover-clockwork

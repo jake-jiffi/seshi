@@ -1,134 +1,107 @@
-# Running a real seshi session with someone
+# Running seshi with someone
 
-Two people, two machines, two real Claude subscriptions. Roughly 15 minutes the first time,
-about 30 seconds every time after.
+Two people, two machines, two Claude subscriptions. About five minutes the first time, about
+thirty seconds every time after.
 
-This has been run end to end: two identities, two `claude -p` processes, over a public `wss://`
-tunnel. What has **not** been tested is two genuinely different physical machines on different
-networks. Everything below should work, and the first run is still a test.
+Verified end to end over a public tunnel with two real models. What has **not** been tested is two
+genuinely different physical machines on different networks. You are about to be the first.
 
 ---
 
-## Before you start, tell them the honest bits
+## Send them this first
 
-Send this to David before he installs anything. He is spending his own money and his own data.
+They are spending their own quota and their own data. Say so before they install anything.
 
-> - It runs on **your** Claude subscription, not mine. A conversation is a few dollars of
->   equivalent usage and it counts against your five-hour and weekly limits.
+> - It runs on **your** Claude subscription, not mine. A conversation is a few dollars of equivalent
+>   usage and it counts against your five-hour and weekly limits.
 > - Whatever your agent says lands permanently in **my** transcripts, and mine in yours.
-> - Your agent gets a dedicated process that can read files you hand it and nothing else.
->   No shell, no network, no writes. That is tier 2 and it is the default.
-> - You can hit Ctrl-C at any point.
+> - Your agent gets a dedicated process that can read files you hand it and nothing else. No shell,
+>   no network, no writes. That is tier 2 and it is the default.
+> - Ctrl-C stops it at any point.
 
 ---
 
-## One-time setup
-
-### Both of you
+## Both of you: install
 
 ```bash
-node --version          # must be 24 or newer
-claude auth status      # must say loggedIn: true, and NOT an API key
-
-git clone <the seshi repo>
-cd seshi
-npm install
+claude plugin marketplace add jake-jiffi/seshi
+claude plugin install seshi@seshi
 ```
 
-Add a shortcut so the commands below read the way they are written:
+Requires **Node 24+** and a Claude Code signed in to a subscription. There is **no npm install**:
+seshi has no runtime dependencies, so the plugin is just files that run.
+
+Check it:
 
 ```bash
-alias seshi='node '"$PWD"'/packages/cli/src/index.ts'
-```
-
-### One of you runs the relay
-
-The relay forwards encrypted frames and holds them for whoever is offline. It sees ciphertext
-and two fingerprints. It cannot read a single word.
-
-```bash
-# terminal 1, leave it running
-seshi relay 8787
-
-# terminal 2, expose it
-cloudflared tunnel --url http://localhost:8787
-```
-
-`cloudflared` prints a URL like `https://routine-authority-sku-breeding.trycloudflare.com`.
-Change `https` to `wss` and that is your relay address. Send it to David.
-
-> A quick tunnel is fine for a first run and the URL dies when you Ctrl-C. For anything ongoing,
-> put the relay on a $5 VPS behind a real domain. Frames are capped at 256 KB and a thousand active
-> pairs is about 25 GB a month.
-
-### Both of you point at it
-
-```bash
-export SESHI_RELAY=wss://routine-authority-sku-breeding.trycloudflare.com
-export SESHI_NAME=jake        # david uses: export SESHI_NAME=david
-seshi init
+claude auth status      # loggedIn: true, and NOT an API key
+node --version          # v24 or newer
 ```
 
 ---
 
-## Pairing, once per person, ever
+## One of you: run the relay
+
+The relay forwards encrypted frames and holds them for whoever is offline. It sees ciphertext and
+two routing fingerprints, and cannot read a word.
 
 ```bash
-seshi invite
+seshi serve
 ```
 
-That prints a `seshi1_…` line. **It is not a secret** — it carries public keys only. Paste it
-into Slack, iMessage, wherever you already talk.
+That starts the relay **and** a tunnel, and prints the address. Leave it running.
 
-You each paste the other's line:
+> The tunnel URL dies when you Ctrl-C, which is right for a conversation between two people at their
+> desks. For anything ongoing, put the relay on a small host you own and both of you
+> `seshi use wss://your-host`. Frames are capped at 256 KB, and a thousand active pairs is about
+> 25 GB a month.
 
-```bash
-seshi pair seshi1_…
-```
-
-Both of you now see **four words**. Read them to each other **on a different channel** — say them
-out loud on a call, not in the chat you sent the invite through. That call is the only thing
-standing between you and someone in the middle.
-
-If the words match:
+Then point yourself at it, in another terminal:
 
 ```bash
-seshi verify david
-```
-
-Raising a tier is deliberately a hand edit, because it is a decision a person makes at their own
-keyboard:
-
-```bash
-# open ~/.seshi/contacts/<their-fingerprint>/contact.json and set "tier": 2
-seshi contacts       # confirm: tier 2, verified
+seshi use wss://<the address it printed>
 ```
 
 ---
 
-## Having a conversation
-
-**You start it:**
+## Start a conversation
 
 ```bash
-seshi talk david decide "should our 2d-to-3d handoff be OBJ or glTF"
+seshi start dave decide "should our 2d-to-3d handoff be OBJ or glTF"
 ```
 
-It prints one line. Send David that line, with his own objective filled in.
+It prints **one line**:
 
-**David joins:**
-
-```bash
-seshi join jake ff9b615d-cab7-4062-b530-8d08295ae9ab "keep quad topology through the handoff, I own the retopology"
+```
+/seshi join 1-ethics-unhappy@falling-tab-discuss-cheats.trycloudflare.com
 ```
 
-Both terminals now stream the conversation as it happens. Ctrl-C either side at any point; it
-writes what it has.
+Send them that. It carries the pairing code and the relay together, and it is **not a secret** — it
+is a bearer to a single-claim mailbox holding public keys.
 
-**Read the result:**
+## Their side, one command
 
 ```bash
-seshi decision ff9b615d-cab7-4062-b530-8d08295ae9ab
+seshi join 1-ethics-unhappy@falling-tab-discuss-cheats.trycloudflare.com "keep quad topology through the handoff, I own the retopology"
+```
+
+That sets their relay, pairs, and joins. Nothing else.
+
+## The one part you must not skip
+
+Both of you now see **four words**:
+
+```
+deer   poet   travel   cup
+```
+
+**Read them to each other out loud, on a call or in person. Not in the chat you sent the link
+through.** If they match, nobody is in the middle. If they differ, stop and do not continue.
+
+Both terminals then stream the conversation. Ctrl-C either side writes what it has.
+
+```bash
+seshi decision <id>     # the artefact, printed at the end
 ```
 
 ### The modes
@@ -137,27 +110,30 @@ seshi decision ff9b615d-cab7-4062-b530-8d08295ae9ab
 |---|---|
 | `teach` | One of you knows something the other wants. The learner drives. |
 | `decide` | You disagree and need one answer. Two advocates. |
-| `build` | You are both producing something and need to fit it together. |
-| `review` | One of you critiques, the other defends. |
+| `build` | You are both producing something that has to fit together. |
+| `review` | One critiques, the other defends. |
 
 ---
 
 ## What a real run looked like
 
 ```
-you    BRIEF      Decide one format for the 2D-to-3D handoff: OBJ or glTF. I open for glTF.
-dave   COUNTER    Downstream is a DCC, not a renderer. That makes it OBJ, because glTF 2.0
-                  has no quad primitive and triangulates the cage on export.
-you    COUNTER    Your quad fact holds, I checked it. I move to OBJ, but not bare OBJ.
-                  Its failures are silent: units, axis, second UV, vertex colour.
-dave   RED_TEAM   Before I sign OBJ, here is the case against it, argued properly.
-you    RED_TEAM   The strongest attack left is on the frame, not on OBJ. Flagged to my human.
-dave   CLOSE      Signed. OBJ+MTL, units and axis declared, schema'd sidecar, glTF post-retopo.
+you    BRIEF          Decide OBJ vs glTF. My position: glTF 2.0 (.glb) as the contract format.
+dave   COUNTER        glTF 2.0 has no quads: primitives are triangles only, so .glb as THE
+                      handoff kills the quad cage.
+you    COUNTER        Before retopology, and that decides it: what crosses the boundary has
+                      no quad cage to destroy.
+dave   RED_TEAM       Red-teaming my own accept: I'll trade OBJ, not the quad guarantee.
+                      'Out of scope' deletes half my human's done-when.
+you    PROPOSE_FINAL  .glb plus a boundary check that FAILS on quads instead of eating them
+                      silently, plus retopo ownership written in as yours.
+dave   ACCEPT         Signed: 1, 2, 4, amended 3, plus 3a and 3b.
+you    CLOSE          glTF 2.0 (.glb), fail-closed quad gate, geometry-only companion.
 ```
 
-Three things there are the product rather than a model being clever: an agent **verified the other's
-claim and changed position on it**, both **argued against the deal before signing it**, and one
-**flagged a question to its human instead of deciding it**.
+Three things there are the product working rather than a model being clever: an agent **verified the
+other's claim and changed position on it**, both **argued against the deal before signing it**, and
+one **refused to trade its human's non-negotiable and escalated instead**.
 
 ---
 
@@ -165,25 +141,25 @@ claim and changed position on it**, both **argued against the deal before signin
 
 | What you see | What it means |
 |---|---|
-| `david is tier 1, which is words only` | Correct default. Compare safety words, then raise to 2 by hand. |
-| `david has not been verified` | Run `seshi verify david` after you have actually compared the four words. |
-| `unknown conversation …` in `seshi contacts` output | They are talking about a conversation you never joined. Use the exact id from their `seshi talk`. |
-| `relay client is not connected` | The tunnel died, or `SESHI_RELAY` differs between you. It must be byte-identical on both sides. |
-| The words **do not match** | Stop. Do not raise the tier. Someone is in the middle, or one of you pasted the wrong invite. Delete `~/.seshi/contacts/<fp>` and pair again. |
-| `Session ID … already in use` | Only possible if you run both sides on one machine with the same `~/.claude`. Fixed, but shout if you see it. |
+| `No relay set` | Nobody is hosting. One of you runs `seshi serve`. |
+| `<name> is tier 1` | Correct default for a new contact. Compare safety words, then `seshi trust <name> 2`. |
+| `has not been verified` | Confirm the four words out of band first. |
+| `relay client is not connected` | The host stopped `seshi serve`, or your addresses differ. |
+| `that does not look like a seshi link` | Paste the whole `code@host` line. |
+| `too many mailbox misses` | You are typing the code wrong repeatedly. Ask for a fresh link. |
+| The words **do not match** | **Stop.** Someone is in the middle. Delete `~/.seshi/contacts/<fp>` and pair again with a new link. |
 
 ---
 
 ## What this does not do yet
 
-Stated plainly so nobody is surprised mid-run.
-
 - **No outbound secret scanning.** Tier 2 denies the shell and denies reading `.env`, `~/.ssh`,
-  `~/.aws` and friends. The residual risk is your agent paraphrasing something confidential it
-  legitimately read. Do not point a first run at a client repo under NDA.
+  `~/.aws` and friends. The residual is your agent paraphrasing something confidential it
+  legitimately read. **Do not point a first run at a client repo under NDA.**
 - **The relay's `hello` is unauthenticated.** Someone who knew your fingerprint could squat it and
   swallow queued frames. They cannot read them or forge one.
+- **The pairing code is not a PAKE.** An actively malicious relay can sit in the middle. The four
+  safety words are what catch that, which is why they are not optional.
 - **Tier 4 does not exist** and is not planned.
-- **The agents under-use the ledger**, so convergence detection is weaker than it looks. Read
-  `DECISION.md`'s "what the detectors saw" section rather than trusting a quiet run.
-- **Nobody has run this across two physical machines yet.** You are about to be the first.
+- **The agents under-use the ledger**, so convergence detection is weaker than it looks. Read the
+  "what the detectors saw" section rather than trusting a quiet run.

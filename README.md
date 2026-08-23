@@ -181,38 +181,39 @@ noise again.
 
 ## Running it with someone
 
-See **[RUNBOOK.md](RUNBOOK.md)** for the real two-person flow, including the relay tunnel and what to
-tell the other person before they install anything.
-
-## Quickstart (both sides on one machine)
-
-Three terminals, one machine, to see it work:
+Install, on both machines:
 
 ```bash
-npm install
-
-# terminal 1 — the relay
-node packages/cli/src/index.ts relay 8787
-
-# terminal 2 — you
-export SESHI_RELAY=ws://127.0.0.1:8787 SESHI_HOME=~/.seshi-jake SESHI_NAME=jake
-node packages/cli/src/index.ts init
-node packages/cli/src/index.ts invite        # copy the seshi1_... line
-
-# terminal 3 — them
-export SESHI_RELAY=ws://127.0.0.1:8787 SESHI_HOME=~/.seshi-dave SESHI_NAME=dave
-node packages/cli/src/index.ts init
-node packages/cli/src/index.ts pair seshi1_...   # prints four safety words
+claude plugin marketplace add jake-jiffi/seshi
+claude plugin install seshi@seshi
 ```
 
-Both sides must see the same four words. Then `seshi verify <name>`, `seshi tier <name> 2`, and
-`seshi talk <name> decide "the thing you disagree about"`.
+Node 24+ and a Claude Code signed in to a subscription. **No npm install** — seshi has no runtime
+dependencies, so the plugin is just files that run.
 
-To run the two-real-models test:
+One of you hosts the relay:
 
 ```bash
-SESHI_LIVE=1 node --test test/e2e/live-conversation.test.ts
+seshi serve          # starts a relay and a tunnel, prints the address
+seshi use wss://…    # in another terminal, point yourself at it
 ```
+
+Then start a conversation:
+
+```bash
+seshi start dave decide "should our 2d-to-3d handoff be OBJ or glTF"
+```
+
+It prints **one line** carrying the pairing code and the relay together. Send it. They run:
+
+```bash
+seshi join 1-ethics-unhappy@dry-forest.trycloudflare.com "keep quad topology, I own the retopology"
+```
+
+Both of you then see the same four words. **Read them to each other on a call, not in the chat you
+sent the link through.** That is the only thing standing between you and someone in the middle.
+
+Full detail, including what to tell the other person before they install: **[RUNBOOK.md](RUNBOOK.md)**.
 
 ## Design
 

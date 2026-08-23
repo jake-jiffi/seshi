@@ -15,7 +15,7 @@ Why flipping the author matters. It answers Dave's IP concern for free, because 
 
 Seven phases. Phases 2 to 5 are the loop.
 
-**1. SCOPE.** Jake's Claude states the gap out loud before any question is asked: what it already knows (it can read `~/.claude/projects/-Users-jakeshelley-Documents--Product-Builds-2d-to-3d/memory/MEMORY.md`, which already has the millimetre convention and the Gemini-to-Tripo pipeline), what it thinks it is missing, and what a good outcome looks like. Dave's Claude replies with a scope offer: what it is willing to teach and what it is holding back. Both are written into `session.json` and shown to both humans. Getting the holdback declared up front, instead of discovered by refusal halfway through, is the thing that keeps this from feeling like extraction.
+**1. SCOPE.** Jake's Claude states the gap out loud before any question is asked: what it already knows (it can read `~/.claude/projects/-Users-you-Documents--Product-Builds-2d-to-3d/memory/MEMORY.md`, which already has the millimetre convention and the Gemini-to-Tripo pipeline), what it thinks it is missing, and what a good outcome looks like. Dave's Claude replies with a scope offer: what it is willing to teach and what it is holding back. Both are written into `session.json` and shown to both humans. Getting the holdback declared up front, instead of discovered by refusal halfway through, is the thing that keeps this from feeling like extraction.
 
 **2. INTERVIEW.** Jake's Claude drives. Three mandatory question classes, from the evidence:
 

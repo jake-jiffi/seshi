@@ -337,7 +337,7 @@ proven for humans reading codes aloud. Three words for `--sensitive`.
 
 **The code carries nothing.** It is a PAKE password, not a key and not a payload. Session id,
 connection info and the shared frame all cross after pairing succeeds, under a key neither side
-transmitted. So the string in Slack is not a secret that leaks, it is a secret that can be guessed
+transmitted. So the string in a connector is not a secret that leaks, it is a secret that can be guessed
 once.
 
 - Expiry 24 hours, single use. Single use is load-bearing: it caps an attacker at one guess and makes
