@@ -47,7 +47,7 @@ import { generateCode, mailboxIds, normaliseCode } from "../../core/src/pairing.
 import { Chain } from "../../core/src/chain.ts";
 import { Storage, type Contact, type ConvoRecord, type PublicBrief } from "./storage.ts";
 import { RelayClient } from "./relay-client.ts";
-import { mailboxPut, mailboxTake } from "./mailbox.ts";
+import { MailboxOccupiedError, mailboxPut, mailboxTake } from "./mailbox.ts";
 
 /** Same shape storage enforces, because a fingerprint becomes a directory name. */
 const FINGERPRINT = /^[0-9a-f]{32}$/;
@@ -75,7 +75,21 @@ export type SeshiNodeOptions = {
 
 export type InboundTurn = { envelope: Envelope; contact: Contact };
 
-export type Pairing = { contact: Contact; safetyWords: string[] };
+export type Pairing = {
+  contact: Contact;
+  safetyWords: string[];
+  /**
+   * What the peer's own bundle called them, which is not necessarily what the
+   * contact ends up called.
+   *
+   * It matters when the two disagree. "seshi invite dave" names the contact
+   * dave because that is who Jake meant to invite, so if the person who
+   * actually walked through the door calls themselves something else, the only
+   * place that shows up is here. Worth putting in front of a human before they
+   * read the safety words.
+   */
+  claimedName: string;
+};
 
 /** What `invite()` hands back: the words to read out, and the wait. */
 export type PendingInvite = {
@@ -226,13 +240,24 @@ export class SeshiNode {
     try {
       await mailboxPut(this.#relayUrl, box.answer, toMailbox(this.inviteBundle()));
     } catch (err) {
+      // Two very different situations, and calling both an attack would train
+      // people to ignore the word. Either way the offer is spent and the code
+      // is dead, so both messages end at the same place: get a fresh one.
+      if (err instanceof MailboxOccupiedError) {
+        throw new Error(
+          `somebody has already answered this code, which means they knew it. Treat it as an ` +
+            `attack: get a fresh code from them over a different channel, and do not use this one.`,
+        );
+      }
       throw new Error(
-        `claimed the invite but could not reply to it: ${(err as Error).message}. Somebody else ` +
-          `has already answered this code, which means they knew it. Treat it as an attack: ` +
-          `get a fresh code over a different channel.`,
+        `claimed the invite but could not reply to it: ${(err as Error).message}. The code is ` +
+          `spent either way, so ask them for a fresh one.`,
       );
     }
-    return this.pairWithBundle(bundle, parsed.name);
+    // No local label on this side: the joiner never named anyone, they were
+    // handed a code. parseInvite already ran, above and again in here, which is
+    // cheap and keeps pairWithBundle the single place a contact is committed.
+    return this.pairWithBundle(bundle);
   }
 
   /** The string you paste to someone. Public keys only, not a secret. */
@@ -281,12 +306,7 @@ export class SeshiNode {
       verifiedAt: existing?.verifiedAt ?? null,
     };
     this.storage.putContact(contact);
-    return { contact, safetyWords: this.safetyWordsFor(contact) };
-  }
-
-  /** @deprecated Use pairWithBundle. Kept so the CLI keeps compiling. */
-  pair(code: string): Pairing {
-    return this.pairWithBundle(code);
+    return { contact, safetyWords: this.safetyWordsFor(contact), claimedName: bundle.name };
   }
 
   /**

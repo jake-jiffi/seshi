@@ -73,9 +73,12 @@ test("two people pair with nothing but a spoken code", async (t) => {
   assert.equal(jakeSide.safetyWords.length, 4);
   assert.deepEqual(jakeSide.safetyWords, daveSide.safetyWords);
 
-  // Jake's local label wins over what Dave's bundle says about itself.
+  // Jake's local label wins over what Dave's bundle says about itself, and the
+  // self-asserted name is still handed back so a human can see the two agree.
   assert.equal(jakeSide.contact.name, "dave");
+  assert.equal(jakeSide.claimedName, "dave");
   assert.equal(daveSide.contact.name, "jake");
+  assert.equal(daveSide.claimedName, "jake");
 
   // Both sides really wrote a contact, so a restart still knows the peer.
   assert.equal(jake.storage.getContact(dave.fingerprint)?.tier, 1);
@@ -132,7 +135,7 @@ test("a code can only be claimed once, so a thief is loud", async (t) => {
 
 test("an answer that is already there stops the join before it commits", async (t) => {
   const { jake, dave, url } = await twoPeople(t);
-  const invite = await jake.invite();
+  const invite = await jake.invite("dave");
   const box = mailboxIds(invite.code);
 
   // Mallory cannot overwrite Jake's offer, but she knows the code, so she can
@@ -141,16 +144,20 @@ test("an answer that is already there stops the join before it commits", async (
   t.after(() => mallory.close());
   await mailboxPut(url, box.answer, encode(mallory.inviteBundle()));
 
-  await assert.rejects(dave.joinWithCode(invite.code), /already answered this code/);
+  await assert.rejects(dave.joinWithCode(invite.code), /already answered this code.*attack/s);
   // Dave committed nothing. His half of the pairing never happened, which is
   // the visible failure the spec asks for.
   assert.deepEqual(dave.storage.listContacts(), []);
 
-  // And this is the honest cost: Jake pairs with Mallory. Only the safety
-  // words catch it, which is why they are read aloud before any tier rises.
+  // And this is the honest cost: Jake pairs with Mallory, under the name Jake
+  // meant for Dave. Two things catch it. The name she asserts is not the name
+  // on the contact, and Dave has no pairing at all, so when Jake reads his four
+  // words down the phone there is nobody to read them back.
   const jakeSide = await invite.waitForPeer(QUICK);
   assert.equal(jakeSide.contact.fingerprint, mallory.fingerprint);
-  assert.notDeepEqual(jakeSide.safetyWords, dave.safetyWordsFor(jakeSide.contact));
+  assert.equal(jakeSide.contact.name, "dave");
+  assert.equal(jakeSide.claimedName, "mallory");
+  assert.equal(dave.storage.getContact(jake.fingerprint), null);
 });
 
 test("a tampered bundle in the mailbox is refused by the fingerprint check", async (t) => {
@@ -207,4 +214,20 @@ test("the pasted bundle path still pairs, unchanged", async (t) => {
   const daveSide = dave.pairWithBundle(jake.inviteBundle());
   assert.deepEqual(jakeSide.safetyWords, daveSide.safetyWords);
   assert.equal(jakeSide.contact.name, "dave");
+});
+
+test("a relay that is not there fails fast rather than hanging or half-pairing", async () => {
+  // A port that was listening a moment ago and is not any more. The connection
+  // never opens, so the request provably never arrived and the client is free
+  // to retry it. What it must not do is hang, or decide the mailbox was empty.
+  const relay = await startRelay({ port: 0 });
+  const url = `ws://127.0.0.1:${relay.port}`;
+  await relay.close();
+
+  const started = Date.now();
+  await assert.rejects(mailboxPut(url, "a".repeat(64), "aGk="), /could not reach the relay/);
+  await assert.rejects(mailboxTake(url, "a".repeat(64)), /could not reach the relay/);
+  // Two ops, three attempts each. The number that matters is that it is nowhere
+  // near the 10 second per-attempt timeout, i.e. it refused rather than waited.
+  assert.ok(Date.now() - started < 8_000, "an unreachable relay should fail fast");
 });

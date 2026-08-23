@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { startRelay } from "../src/server.ts";
+import { MBOX_TTL_MS, startRelay } from "../src/server.ts";
 
 const FP_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const FP_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -253,10 +253,11 @@ test("refuses a send before hello and rejects malformed input", async () => {
 
 const MBOX_A = "a".repeat(64);
 const MBOX_B = "b".repeat(64);
-const DAY_MS = 24 * 60 * 60 * 1000;
+/** Exactly the TTL, so tests can sit either side of the boundary. */
+const TTL_MS = MBOX_TTL_MS;
 
-/** A relay on a clock the test moves by hand, so the real 24 hour TTL can be
- *  crossed without a test that takes 24 hours. */
+/** A relay on a clock the test moves by hand, so the TTL can be crossed
+ *  without a test that waits it out. */
 async function withRelayOnClock(
   clock: { ms: number },
   fn: (port: number) => Promise<void>,
@@ -299,6 +300,11 @@ test("a wrong code finds an empty mailbox rather than an error", async () => {
     c.send({ t: "mbox_put", id: MBOX_A, data: b64("bundle") });
     assert.deepEqual(await c.next(), { t: "mbox_ok" });
 
+    // Only that one refusal is coded. A malformed put is just an error, so the
+    // code cannot be used to probe anything else.
+    c.send({ t: "mbox_put", id: "nope", data: b64("x") });
+    assert.equal((await c.next())["code"], undefined);
+
     // A guess that is one mailbox off learns nothing about whether MBOX_A
     // exists: it gets the same answer an unused relay would give.
     c.send({ t: "mbox_take", id: MBOX_B });
@@ -317,14 +323,18 @@ test("a put over a live mailbox is refused, and the original is untouched", asyn
     // The attack this refuses: swap your keys in for the inviter's and the
     // invitee pairs with you with no visible symptom at all.
     mallory.send({ t: "mbox_put", id: MBOX_A, data: b64("mallory's bundle") });
-    assert.equal((await mallory.next()).t, "error");
+    const refusal = await mallory.next();
+    assert.equal(refusal.t, "error");
+    // Machine readable, because the joiner has to tell this refusal from a
+    // network failure: one is an alarm, the other is a bad afternoon.
+    assert.equal(refusal["code"], "occupied");
 
     jake.send({ t: "mbox_take", id: MBOX_A });
     assert.deepEqual(await jake.next(), { t: "mbox_data", data: b64("jake's bundle") });
   });
 });
 
-test("a mailbox expires 24 hours after it was written", async () => {
+test("a mailbox expires once its short TTL is up", async () => {
   const clock = { ms: 1_700_000_000_000 };
   await withRelayOnClock(clock, async (port) => {
     const c = await Client.connect(port);
@@ -333,7 +343,7 @@ test("a mailbox expires 24 hours after it was written", async () => {
     assert.deepEqual(await c.next(), { t: "mbox_ok" });
 
     // One millisecond short of a day is still a live invite.
-    clock.ms += DAY_MS - 1;
+    clock.ms += TTL_MS - 1;
     c.send({ t: "mbox_take", id: MBOX_A });
     assert.deepEqual(await c.next(), { t: "mbox_data", data: b64("bundle") });
 
@@ -341,7 +351,7 @@ test("a mailbox expires 24 hours after it was written", async () => {
     assert.deepEqual(await c.next(), { t: "mbox_ok" });
 
     // A day exactly is not.
-    clock.ms += DAY_MS;
+    clock.ms += TTL_MS;
     c.send({ t: "mbox_take", id: MBOX_A });
     assert.deepEqual(await c.next(), { t: "mbox_empty" });
 
@@ -362,13 +372,24 @@ test("expired mailboxes are swept rather than accumulating", async () => {
     for (let i = 0; i < 50; i++) c.send({ t: "mbox_put", id: id(i), data: b64("x") });
     for (let i = 0; i < 50; i++) assert.deepEqual(await c.next(), { t: "mbox_ok" });
 
-    // Nobody ever claims them. A day later they are gone without a take, which
-    // is what stops an abandoned invite living in memory forever.
-    clock.ms += DAY_MS + 1;
+    // Nobody ever claims them. Once the TTL passes they are gone without a
+    // take, which is what stops an abandoned invite living in memory forever.
+    clock.ms += TTL_MS + 1;
+
+    // Checking 50 misses from one connection would trip the miss budget, which
+    // is exactly what that budget is for: nothing legitimate misses repeatedly.
+    // So this reconnects, the way an honest client that had 50 abandoned
+    // invites would have to.
+    let checker = c;
     for (let i = 0; i < 50; i++) {
-      c.send({ t: "mbox_take", id: id(i) });
-      assert.deepEqual(await c.next(), { t: "mbox_empty" }, `mailbox ${i} outlived its day`);
+      if (i > 0 && i % 15 === 0) {
+        checker.ws.close();
+        checker = await Client.connect(port);
+      }
+      checker.send({ t: "mbox_take", id: id(i) });
+      assert.deepEqual(await checker.next(), { t: "mbox_empty" }, `mailbox ${i} outlived its TTL`);
     }
+    if (checker !== c) checker.ws.close();
   });
 });
 

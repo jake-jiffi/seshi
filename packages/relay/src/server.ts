@@ -24,8 +24,27 @@ const FINGERPRINT = /^[0-9a-f]{32}$/;
 // fingerprint would tell the relay operator which identity is behind a pending
 // invite, and buys nothing: the id is already the only credential.
 
-/** A mailbox lives 24 hours, then it is gone whether or not anyone took it. */
-const MBOX_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * How long a pairing mailbox lives.
+ *
+ * Was 24 hours, which is 96x longer than the flow it serves: `invite()` waits
+ * ten minutes for the other side and then gives up. Every extra minute is
+ * exposure for a code someone can guess, so the window matches the wait.
+ */
+export const MBOX_TTL_MS = 15 * 60_000;
+
+/**
+ * Consecutive mailbox misses one connection may make before it is cut off.
+ *
+ * Single claim caps an attacker at one guess per CODE. It does nothing about
+ * guessing WHICH codes exist, and that is the real attack: measured before this
+ * existed, one connection managed 1,172 take attempts a second, a full sweep of
+ * the 25.2-bit code space in under nine hours, against mailboxes that lived a
+ * whole day. A genuine joiner takes exactly one mailbox and hits it, so a budget
+ * this small costs them nothing and makes enumeration need millions of
+ * connections rather than one.
+ */
+const MBOX_MAX_MISSES = 20;
 
 /** Total live mailboxes. Past this a put is refused, so this is not a heap. */
 const MBOX_MAX = 10_000;
@@ -133,11 +152,21 @@ export async function startRelay(opts: {
 
   wss.on("connection", (socket) => {
     let fp: string | null = null;
+    let misses = 0;
 
     const reply = (m: unknown): void => {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(m));
     };
-    const fail = (msg: string): void => reply({ t: "error", msg });
+    /**
+     * `code` is set only where a caller has to tell one refusal from another.
+     *
+     * "occupied" is the one that matters: a joiner whose put is refused has
+     * either hit a network problem or found someone already sitting in their
+     * mailbox, and those are a bad afternoon and an alarm respectively. Every
+     * other refusal stays uncoded so the field cannot be used to probe.
+     */
+    const fail = (msg: string, code?: string): void =>
+      reply(code === undefined ? { t: "error", msg } : { t: "error", msg, code });
 
     socket.on("message", (data) => {
       let parsed: unknown;
@@ -223,7 +252,7 @@ export async function startRelay(opts: {
         // code swap their own keys in for the inviter's, and the invitee would
         // pair with them with no visible symptom at all.
         if (liveMailbox(id) !== null) {
-          fail("mailbox is already occupied");
+          fail("mailbox is already occupied", "occupied");
           return;
         }
         if (mailboxes.size >= MBOX_MAX) {
@@ -239,6 +268,11 @@ export async function startRelay(opts: {
       }
 
       if (m["t"] === "mbox_take") {
+        if (misses >= MBOX_MAX_MISSES) {
+          fail("too many mailbox misses on this connection, slow down");
+          socket.close(4029, "rate limited");
+          return;
+        }
         const id = asString(m["id"]);
         if (id === null || !MBOX_ID.test(id)) {
           fail("bad mailbox id");
@@ -247,9 +281,13 @@ export async function startRelay(opts: {
         sweepMailboxes();
         const box = liveMailbox(id);
         if (box === null) {
+          // A miss is the only signal that someone is guessing, so it is the
+          // thing counted. A real joiner never produces one.
+          misses += 1;
           reply({ t: "mbox_empty" });
           return;
         }
+        misses = 0;
         // SINGLE CLAIM. The entry dies on the way out, so a guessed or stolen
         // code buys exactly one attempt and the real invitee's join then fails
         // loudly, rather than both of them quietly succeeding.

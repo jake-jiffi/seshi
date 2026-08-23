@@ -24,27 +24,45 @@
 /** Long enough for a slow relay, short enough that a poll loop keeps polling. */
 const DEFAULT_TIMEOUT_MS = 10_000;
 
+/** Extra tries for a connection that never got off the ground. See `attempt`. */
+const CONNECT_RETRIES = 2;
+const RETRY_PAUSE_MS = 150;
+
 export type MailboxOptions = { timeoutMs?: number };
 
-function request(
-  url: string,
-  message: unknown,
-  timeoutMs: number,
-): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
+/**
+ * The three ways one attempt can end, kept apart because they are not equally
+ * safe to repeat.
+ *
+ * A mailbox op is NOT idempotent: mbox_take deletes what it returns, and
+ * mbox_put refuses a second write. So the only failure worth retrying is one
+ * where the request provably never arrived, which is exactly the case where
+ * the socket never opened. A socket that opened and then died is ambiguous:
+ * the relay may have claimed the mailbox and lost the answer on the way back,
+ * and a retry would report an empty mailbox for an invite that was in fact
+ * spent. That is reported as a failure instead.
+ */
+type Attempt =
+  | { reply: Record<string, unknown> }
+  | { unreachable: Error }
+  | { failed: Error };
+
+function attempt(url: string, message: unknown, timeoutMs: number): Promise<Attempt> {
+  return new Promise((resolve) => {
     const socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
     let settled = false;
+    let opened = false;
 
     const finish = (err: Error | null, value?: Record<string, unknown>): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       // close(), not terminate(): the built-in WebSocket has no terminate, and
-      // the answer is already in hand, so a tidy close costs nothing.
+      // whatever the outcome, this socket has no further use.
       socket.close();
-      if (err !== null) reject(err);
-      else resolve(value as Record<string, unknown>);
+      if (err === null) resolve({ reply: value as Record<string, unknown> });
+      else resolve(opened ? { failed: err } : { unreachable: err });
     };
 
     const timer = setTimeout(
@@ -53,7 +71,10 @@ function request(
     );
     timer.unref?.();
 
-    socket.addEventListener("open", () => socket.send(JSON.stringify(message)));
+    socket.addEventListener("open", () => {
+      opened = true;
+      socket.send(JSON.stringify(message));
+    });
     socket.addEventListener("message", (event) => {
       const data: unknown = event.data;
       let parsed: unknown;
@@ -77,6 +98,37 @@ function request(
   });
 }
 
+const pause = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    t.unref?.();
+  });
+
+async function request(
+  url: string,
+  message: unknown,
+  timeoutMs: number,
+): Promise<Record<string, unknown>> {
+  let last: Error = new Error("could not reach the relay");
+  for (let i = 0; i <= CONNECT_RETRIES; i++) {
+    if (i > 0) await pause(RETRY_PAUSE_MS);
+    const outcome = await attempt(url, message, timeoutMs);
+    if ("reply" in outcome) return outcome.reply;
+    if ("failed" in outcome) throw outcome.failed;
+    last = outcome.unreachable;
+  }
+  throw last;
+}
+
+/**
+ * The relay refused a put because something is already in that mailbox.
+ *
+ * Its own type because the caller must not confuse it with a network failure:
+ * an occupied pairing answer means somebody who knew the code answered first,
+ * and that is an alarm rather than a retry.
+ */
+export class MailboxOccupiedError extends Error {}
+
 const refusal = (m: Record<string, unknown>): string =>
   typeof m["msg"] === "string" ? m["msg"] : `unexpected reply ${String(m["t"])}`;
 
@@ -89,6 +141,7 @@ export async function mailboxPut(
 ): Promise<void> {
   const m = await request(url, { t: "mbox_put", id, data }, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   if (m["t"] === "mbox_ok") return;
+  if (m["code"] === "occupied") throw new MailboxOccupiedError(refusal(m));
   throw new Error(`the relay refused the mailbox: ${refusal(m)}`);
 }
 

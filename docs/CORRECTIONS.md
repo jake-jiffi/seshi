@@ -252,3 +252,46 @@ bytes and the other echoing those bytes. That is a protocol change and it is not
 Ship three detectors that work over four where one cries wolf. `packages/core/test/detectors-false-positives.test.ts`
 is the specification for what "healthy" looks like; anything in it that starts failing means a
 detector has become noise.
+
+## C9. The pairing mailbox was enumerable
+
+Found by auditing the pairing agent's work rather than trusting it, because that agent went idle
+without ever reporting.
+
+The mailbox had single-claim, a put-over-existing refusal, a TTL and a total cap. All correct, and
+all aimed at the wrong attack. Single claim caps a guesser at one attempt per **code**. Nothing
+capped guessing **which codes exist**, which is the actual attack.
+
+Measured, before the fix:
+
+```
+1,172 mailbox take attempts per second on ONE connection
+code space 37,748,736 (25.2 bits)
+full sweep in 8.9 hours, against mailboxes that lived 24 hours
+```
+
+So a single connection could enumerate every live pairing code nearly three times over inside one
+mailbox lifetime. Landing on a live offer means claiming it, pairing as the inviter's contact, and
+the real invitee's join then failing — which is loud, but only if the human reads the safety words.
+
+**Fixed two ways.** A per-connection budget of 20 consecutive misses, then the socket is closed with
+a stated reason (a genuine joiner takes exactly one mailbox and hits it, so this costs them nothing).
+And the TTL drops from 24 hours to 15 minutes, because `invite()` only ever waits ten: the old window
+was 96x longer than the flow it served.
+
+After: 20 guesses per connection, so a sweep needs ~1.9 million connections against a window 96x
+smaller.
+
+The sweep test now reconnects every 15 checks, because it legitimately makes 50 misses and the budget
+correctly cut it off. That interaction is the fix working, not a bug in it.
+
+### A mistake of mine worth recording
+
+I ran `git checkout packages/relay/src/server.ts` while the pairing agent was **still writing**,
+which discarded its uncommitted work. Its tests survived and started failing against an
+implementation that no longer had the machine-readable `code: "occupied"` refusal they expected. I
+restored it, because it is the right design: a joiner whose put is refused needs to tell "someone is
+already sitting in my mailbox" (an alarm) from "the network died" (a bad afternoon).
+
+The lesson is the boring one: do not run destructive git commands against a tree an agent is still
+working in.
