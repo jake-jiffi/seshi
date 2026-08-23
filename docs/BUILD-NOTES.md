@@ -10,31 +10,49 @@ no `declare` fields**. Use `const` objects and union types instead of enums.
 
 ## Imports
 Relative imports MUST carry the `.ts` extension: `import { x } from "./identity.ts"`.
-Package imports MUST carry `.js`: `@noble/curves/ed25519.js`.
+
+## No dependencies in the client. None.
+
+`seshi` ships as a Claude Code plugin, and the whole promise is that installing
+it is one line. Every runtime dependency is an `npm install` a user has to run,
+so the client has zero of them: `package.json` has no `dependencies` block at
+all, and it stays that way. Node 24 does all of it natively.
+
+`ws` survives as a **devDependency** because the relay SERVER needs a WebSocket
+server, which Node has no built-in for. Nobody running seshi runs a relay, and
+`packages/cli/src/index.ts` imports the relay lazily, inside the `relay`
+subcommand, so a missing `ws` cannot break any other command.
 
 ## Exact crypto API (verified on this machine, do not guess)
 
+All of it is `node:crypto`. Keys live as raw 32 byte `Uint8Array`s everywhere in
+seshi, and `packages/core/src/identity.ts` is the ONLY place that knows how to
+turn those into the DER node:crypto actually wants. Import `signBytes`,
+`verifyBytes`, `sharedSecret` and `generateSealPair` from there rather than
+building a second copy of that plumbing.
+
 ```ts
-import { ed25519, x25519 } from "@noble/curves/ed25519.js";
-import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
+import { createCipheriv, createDecipheriv, createHash, generateKeyPairSync } from "node:crypto";
+import { generateSealPair, sharedSecret, signBytes, verifyBytes } from "./identity.ts";
 
-const priv = ed25519.utils.randomSecretKey();      // Uint8Array(32)
-const pub  = ed25519.getPublicKey(priv);
-const sig  = ed25519.sign(msgBytes, priv);         // Uint8Array(64)
-const ok   = ed25519.verify(sig, msgBytes, pub);
+const sig = signBytes(msgBytes, signPriv);         // Uint8Array(64)
+const ok  = verifyBytes(sig, msgBytes, signPub);   // false, never a throw
 
-const xpriv   = x25519.utils.randomSecretKey();
-const xpub    = x25519.getPublicKey(xpriv);
-const shared  = x25519.getSharedSecret(xpriv, theirXpub);
+const eph    = generateSealPair();                 // { pub, priv }, both 32 bytes
+const shared = sharedSecret(eph.priv, theirSealPub);
 
-const aead = xchacha20poly1305(key32, nonce24);
-const ct   = aead.encrypt(plaintextBytes);
-const pt   = aead.decrypt(ct);                     // throws on auth failure
+// chacha20-poly1305 is the IETF one: a 12 byte nonce, not XChaCha's 24. That is
+// safe here only because sealEnvelope makes a fresh ephemeral pair per message,
+// so no AEAD key is ever used twice. Read the comment on NONCE_BYTES first.
+const cipher = createCipheriv("chacha20-poly1305", key32, nonce12, { authTagLength: 16 });
+const ct     = Buffer.concat([cipher.update(pt), cipher.final(), cipher.getAuthTag()]);
+
+const sha = createHash("sha256").update(str, "utf8").digest("hex");
 ```
 
-`ws`: `import { WebSocketServer, WebSocket } from "ws";`
+Sockets: the client uses Node's global `WebSocket` (`new WebSocket(url)` plus
+`addEventListener("open"|"message"|"close"|"error")`). Only the relay server
+imports `ws`, and only `WebSocketServer` is unavailable natively.
 
 ## Rules that are not negotiable
 - Never set, read, or require `ANTHROPIC_API_KEY`. Never pass `--bare` to `claude`.

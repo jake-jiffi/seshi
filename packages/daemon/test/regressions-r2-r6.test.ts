@@ -8,9 +8,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startRelay } from "@seshi/relay/server";
-import { SeshiNode } from "@seshi/daemon/node";
-import type { PublicBrief } from "@seshi/daemon/storage";
+import { startRelay } from "../../relay/src/server.ts";
+import { SeshiNode } from "../src/node.ts";
+import type { PublicBrief } from "../src/storage.ts";
 import { createWorktree, branchNameFor } from "../src/worktree.ts";
 
 const dirs: string[] = [];
@@ -41,8 +41,8 @@ async function pairUp(t: { after: (fn: () => void | Promise<void>) => void }) {
   const jake = await SeshiNode.open({ home: tmp("jake"), relayUrl: url, name: "jake" });
   const daveHome = tmp("dave");
   const dave = await SeshiNode.open({ home: daveHome, relayUrl: url, name: "dave" });
-  dave.pair(jake.invite());
-  jake.pair(dave.invite());
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
   t.after(async () => { jake.close(); dave.close(); await relay.close(); });
   return { relay, url, jake, dave, daveHome };
 }
@@ -108,8 +108,8 @@ test("R6: a paired peer cannot send into a conversation that is with someone els
   const { url, jake, dave } = await pairUp(t);
   const mallory = await SeshiNode.open({ home: tmp("mal"), relayUrl: url, name: "mallory" });
   t.after(() => mallory.close());
-  dave.pair(mallory.invite());
-  mallory.pair(dave.invite());
+  dave.pairWithBundle(mallory.inviteBundle());
+  mallory.pairWithBundle(dave.inviteBundle());
 
   // Dave has a conversation with Jake. Mallory is separately paired with Dave
   // and knows its id.

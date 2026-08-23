@@ -16,8 +16,7 @@
 // proves who wrote a turn; the chain proves nothing was dropped, reordered or
 // rewritten afterwards.
 
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
+import { createHash } from "node:crypto";
 import type { Envelope } from "./envelope.ts";
 
 /** Every author's first turn. `prev` is null there and nowhere else. */
@@ -28,7 +27,7 @@ export type Verdict = "ok" | "gap" | "fork";
 
 /** `"sha256:<64 hex>"` over the canonical form of everything but `from`. */
 export function envelopeHash(e: Envelope): string {
-  return `sha256:${bytesToHex(sha256(utf8ToBytes(canonicalJson(covered(e)))))}`;
+  return `sha256:${createHash("sha256").update(canonicalJson(covered(e)), "utf8").digest("hex")}`;
 }
 
 /**

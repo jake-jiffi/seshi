@@ -10,7 +10,7 @@
  * framing and its authentication live in control.ts.
  */
 
-import { fingerprint as fingerprintOf } from "@seshi/core/identity";
+import { fingerprint as fingerprintOf } from "../../core/src/identity.ts";
 import { startControlServer, type ControlServer, type VerbHandler } from "./control.ts";
 import { Storage, type Contact } from "./storage.ts";
 import type { Tier } from "./tiers.ts";

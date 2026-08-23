@@ -1,5 +1,4 @@
 import { test } from "node:test";
-import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import assert from "node:assert/strict";
 import {
   generateIdentity,
@@ -7,6 +6,9 @@ import {
   safetyWords,
   serializeIdentity,
   parseIdentity,
+  sharedSecret,
+  signBytes,
+  verifyBytes,
 } from "../src/identity.ts";
 import { WORDLIST } from "../src/wordlist.ts";
 
@@ -81,14 +83,72 @@ test("a round-tripped identity still signs, verifies and agrees on a shared secr
   const b = parseIdentity(serializeIdentity(generateIdentity()));
   const msg = new TextEncoder().encode("the artefact both sides sign");
 
-  assert.ok(ed25519.verify(ed25519.sign(msg, a.sign.priv), msg, a.sign.pub));
-  assert.ok(!ed25519.verify(ed25519.sign(msg, a.sign.priv), msg, b.sign.pub));
+  assert.ok(verifyBytes(signBytes(msg, a.sign.priv), msg, a.sign.pub));
+  assert.ok(!verifyBytes(signBytes(msg, a.sign.priv), msg, b.sign.pub));
 
-  const fromA = x25519.getSharedSecret(a.seal.priv, b.seal.pub);
-  const fromB = x25519.getSharedSecret(b.seal.priv, a.seal.pub);
+  const fromA = sharedSecret(a.seal.priv, b.seal.pub);
+  const fromB = sharedSecret(b.seal.priv, a.seal.pub);
   assert.deepEqual(fromA, fromB);
   // the point of safety words: both humans read the same list off their own machine
   assert.deepEqual(safetyWords(fromA), safetyWords(fromB));
+});
+
+// ---------------------------------------------------------------------------
+// Known answers, not self-consistency.
+//
+// Signing and key agreement now run through node:crypto, which takes DER and
+// not the 32 raw bytes seshi stores. A wrong DER wrapper would be invisible to
+// every test above, because both ends of the round trip would be wrong the same
+// way, and seshi would happily talk to itself in a dialect no other Ed25519 or
+// X25519 implementation understands. These two vectors are the fixed point.
+// ---------------------------------------------------------------------------
+
+const unhex = (h: string): Uint8Array => new Uint8Array(Buffer.from(h, "hex"));
+
+test("signing matches RFC 8032 test vector 1", () => {
+  const priv = unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+  const pub = unhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+  const expected =
+    "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155" +
+    "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b";
+
+  const sig = signBytes(new Uint8Array(0), priv);
+  assert.equal(Buffer.from(sig).toString("hex"), expected);
+  assert.ok(verifyBytes(sig, new Uint8Array(0), pub));
+});
+
+test("key agreement matches RFC 7748 section 6.1", () => {
+  const alicePriv = unhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+  const alicePub = unhex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+  const bobPriv = unhex("5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb");
+  const bobPub = unhex("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+  const expected = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
+
+  assert.equal(Buffer.from(sharedSecret(alicePriv, bobPub)).toString("hex"), expected);
+  assert.equal(Buffer.from(sharedSecret(bobPriv, alicePub)).toString("hex"), expected);
+});
+
+test("a key with bytes glued on the end is not the same key", () => {
+  // DER declares its own length and OpenSSL stops reading there, so `key + junk`
+  // parses as `key` unless something refuses it. That would be one key with
+  // infinitely many spellings, only one of which has the right fingerprint.
+  const id = generateIdentity();
+  const msg = new TextEncoder().encode("one key, one spelling");
+  const sig = signBytes(msg, id.sign.priv);
+  const padded = new Uint8Array(33);
+  padded.set(id.sign.pub, 0);
+
+  assert.ok(verifyBytes(sig, msg, id.sign.pub), "the real key still verifies");
+  assert.equal(verifyBytes(sig, msg, padded), false);
+  assert.throws(() => sharedSecret(id.seal.priv, padded), /32 bytes/);
+  assert.throws(() => signBytes(msg, new Uint8Array(33)), /32 bytes/);
+});
+
+test("an all-zero peer key is refused rather than agreed with", () => {
+  // The all-zero point has no shared secret worth the name. node throws; the
+  // envelope layer relies on that landing as a decrypt failure.
+  const id = generateIdentity();
+  assert.throws(() => sharedSecret(id.seal.priv, new Uint8Array(32)));
 });
 
 test("serialized identity is hex-only JSON at version 1", () => {

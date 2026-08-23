@@ -46,8 +46,8 @@ import {
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Identity } from "@seshi/core/identity";
-import { fingerprint, parseIdentity, serializeIdentity } from "@seshi/core/identity";
+import type { Identity } from "../../core/src/identity.ts";
+import { fingerprint, parseIdentity, serializeIdentity } from "../../core/src/identity.ts";
 import type { Tier } from "./tiers.ts";
 
 /** Owner-only, for directories and for every file holding a secret. */

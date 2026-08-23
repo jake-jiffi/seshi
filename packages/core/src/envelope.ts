@@ -3,7 +3,7 @@
 // Wire layout, all binary, no framing characters:
 //
 //   [ 32 bytes ephemeral X25519 public key ]
-//   [ 24 bytes XChaCha20 nonce             ]
+//   [ 12 bytes ChaCha20-Poly1305 nonce     ]
 //   [ ciphertext + 16 byte Poly1305 tag    ]
 //
 // and inside the ciphertext:
@@ -13,11 +13,15 @@
 // The signature lives inside the sealed blob on purpose: the relay routes by
 // fingerprint and must not learn who signed what.
 
-import { ed25519, x25519 } from "@noble/curves/ed25519.js";
-import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToUtf8, concatBytes, randomBytes, utf8ToBytes } from "@noble/hashes/utils.js";
-import { fingerprint, type Identity } from "./identity.ts";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import {
+  fingerprint,
+  generateSealPair,
+  sharedSecret,
+  signBytes,
+  verifyBytes,
+  type Identity,
+} from "./identity.ts";
 
 export const ACTS = [
   "BRIEF",
@@ -83,9 +87,19 @@ export const BODY_MAX = 1200;
 export const SIGN_DOMAIN = "seshi-envelope-v1";
 
 const EPH_BYTES = 32;
-const NONCE_BYTES = 24;
+/**
+ * 12 bytes, the IETF ChaCha20-Poly1305 nonce, and short only because the key is
+ * never reused. sealEnvelope generates a fresh ephemeral X25519 pair for every
+ * single message, so every message gets an AEAD key of its own and a random
+ * nonce has nothing to collide with. The birthday bound that makes 12 bytes
+ * uncomfortable elsewhere applies to many nonces under ONE key, which cannot
+ * happen here. If the ephemeral pair ever became long-lived, this constant
+ * would have to grow a counter or the construction would have to change.
+ */
+const NONCE_BYTES = 12;
 const SIG_BYTES = 64;
 const TAG_BYTES = 16;
+const CIPHER = "chacha20-poly1305";
 const PREV_HASH = /^sha256:[0-9a-f]{64}$/;
 
 /**
@@ -136,14 +150,17 @@ export function sealEnvelope(e: Envelope, from: Identity, toSealPub: Uint8Array)
   // `from` rides along exactly as the spec draws it, and is decoration. The
   // receiver overwrites it. Nothing downstream may read it off the wire.
   const jsonBytes = utf8ToBytes(JSON.stringify(validate(e)));
-  const sig = ed25519.sign(signedBytes(toSealPub, jsonBytes), from.sign.priv);
+  const sig = signBytes(signedBytes(toSealPub, jsonBytes), from.sign.priv);
 
-  const ephPriv = x25519.utils.randomSecretKey();
+  const eph = generateSealPair();
   const nonce = randomBytes(NONCE_BYTES);
-  const key = sha256(x25519.getSharedSecret(ephPriv, toSealPub));
-  const ct = xchacha20poly1305(key, nonce).encrypt(concatBytes(sig, jsonBytes));
+  const cipher = createCipheriv(CIPHER, aeadKey(eph.priv, toSealPub), nonce, {
+    authTagLength: TAG_BYTES,
+  });
+  const body = concatBytes(sig, jsonBytes);
+  const ct = concatBytes(cipher.update(body), cipher.final(), cipher.getAuthTag());
 
-  return concatBytes(x25519.getPublicKey(ephPriv), nonce, ct);
+  return concatBytes(eph.pub, nonce, ct);
 }
 
 /**
@@ -174,7 +191,7 @@ export function openEnvelope(
     throw new Error("malformed envelope: payload is not JSON");
   }
 
-  if (!verify(sig, signedBytes(me.seal.pub, jsonBytes), fromSignPub)) {
+  if (!verifyBytes(sig, signedBytes(me.seal.pub, jsonBytes), fromSignPub)) {
     throw new Error("bad signature: envelope was not signed by the expected key");
   }
 
@@ -192,10 +209,15 @@ function decrypt(wire: Uint8Array, me: Identity): Uint8Array {
   }
   const ephPub = wire.subarray(0, EPH_BYTES);
   const nonce = wire.subarray(EPH_BYTES, EPH_BYTES + NONCE_BYTES);
-  const ct = wire.subarray(EPH_BYTES + NONCE_BYTES);
+  const sealed = wire.subarray(EPH_BYTES + NONCE_BYTES);
+  const ct = sealed.subarray(0, sealed.length - TAG_BYTES);
+  const tag = sealed.subarray(sealed.length - TAG_BYTES);
   try {
-    const key = sha256(x25519.getSharedSecret(me.seal.priv, ephPub));
-    return xchacha20poly1305(key, nonce).decrypt(ct);
+    const decipher = createDecipheriv(CIPHER, aeadKey(me.seal.priv, ephPub), nonce, {
+      authTagLength: TAG_BYTES,
+    });
+    decipher.setAuthTag(tag);
+    return concatBytes(decipher.update(ct), decipher.final());
   } catch {
     // Deliberately one message for every failure: a bad tag, a bad ephemeral
     // key and a frame meant for someone else must not be distinguishable.
@@ -203,18 +225,36 @@ function decrypt(wire: Uint8Array, me: Identity): Uint8Array {
   }
 }
 
-/** ed25519.verify throws rather than returning false on a malformed key, so a
- *  corrupt contacts entry must not surface as something other than a rejection. */
-function verify(sig: Uint8Array, msg: Uint8Array, pub: Uint8Array): boolean {
-  try {
-    return ed25519.verify(sig, msg, pub);
-  } catch {
-    return false;
-  }
+/** The AEAD key. Hashing the curve output keeps the raw shared secret off the
+ *  cipher, and gives exactly the 32 bytes ChaCha20-Poly1305 wants. */
+function aeadKey(myPriv: Uint8Array, theirPub: Uint8Array): Buffer {
+  return createHash("sha256").update(sharedSecret(myPriv, theirPub)).digest();
 }
 
 function signedBytes(toSealPub: Uint8Array, jsonBytes: Uint8Array): Uint8Array {
   return concatBytes(utf8ToBytes(SIGN_DOMAIN), toSealPub, jsonBytes);
+}
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const p of parts) total += p.length;
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
+
+function utf8ToBytes(s: string): Uint8Array {
+  return new TextEncoder().encode(s);
+}
+
+/** Lenient, like every UTF-8 decoder in a browser: invalid bytes become U+FFFD
+ *  and fall over at JSON.parse, which is where a peer's rubbish belongs. */
+function bytesToUtf8(b: Uint8Array): string {
+  return new TextDecoder().decode(b);
 }
 
 /**

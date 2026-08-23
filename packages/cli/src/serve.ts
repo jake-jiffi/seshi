@@ -12,7 +12,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { startRelay } from "@seshi/relay/server";
+import { startRelay } from "../../relay/src/server.ts";
 
 type Tunnel = { url: string; child: ChildProcess; tool: string };
 

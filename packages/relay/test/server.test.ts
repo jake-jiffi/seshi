@@ -245,3 +245,195 @@ test("refuses a send before hello and rejects malformed input", async () => {
     assert.equal((await a.next()).t, "error");
   });
 });
+
+// ---- pairing mailboxes (spec s8) --------------------------------------------
+//
+// Every rule below is a security property rather than a nicety, so each has its
+// own test and each test says which attack it refuses.
+
+const MBOX_A = "a".repeat(64);
+const MBOX_B = "b".repeat(64);
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** A relay on a clock the test moves by hand, so the real 24 hour TTL can be
+ *  crossed without a test that takes 24 hours. */
+async function withRelayOnClock(
+  clock: { ms: number },
+  fn: (port: number) => Promise<void>,
+): Promise<void> {
+  const relay = await startRelay({ port: 0, now: () => clock.ms });
+  try {
+    await fn(relay.port);
+  } finally {
+    await relay.close();
+  }
+}
+
+test("a mailbox is claimed exactly once, and the second claim is empty", async () => {
+  await withRelay(async (port) => {
+    // No hello anywhere in this test. A mailbox op is deliberately anonymous:
+    // it must not tell the relay which identity is behind a pending invite.
+    const inviter = await Client.connect(port);
+    const claimer = await Client.connect(port);
+
+    inviter.send({ t: "mbox_put", id: MBOX_A, data: b64("jake's bundle") });
+    assert.deepEqual(await inviter.next(), { t: "mbox_ok" });
+
+    claimer.send({ t: "mbox_take", id: MBOX_A });
+    assert.deepEqual(await claimer.next(), { t: "mbox_data", data: b64("jake's bundle") });
+
+    // SINGLE CLAIM. Whoever comes second is the real invitee finding out, and
+    // that is the alarm: a stolen code fails loudly rather than working twice.
+    claimer.send({ t: "mbox_take", id: MBOX_A });
+    assert.deepEqual(await claimer.next(), { t: "mbox_empty" });
+
+    // Including for the person who wrote it.
+    inviter.send({ t: "mbox_take", id: MBOX_A });
+    assert.deepEqual(await inviter.next(), { t: "mbox_empty" });
+  });
+});
+
+test("a wrong code finds an empty mailbox rather than an error", async () => {
+  await withRelay(async (port) => {
+    const c = await Client.connect(port);
+    c.send({ t: "mbox_put", id: MBOX_A, data: b64("bundle") });
+    assert.deepEqual(await c.next(), { t: "mbox_ok" });
+
+    // A guess that is one mailbox off learns nothing about whether MBOX_A
+    // exists: it gets the same answer an unused relay would give.
+    c.send({ t: "mbox_take", id: MBOX_B });
+    assert.deepEqual(await c.next(), { t: "mbox_empty" });
+  });
+});
+
+test("a put over a live mailbox is refused, and the original is untouched", async () => {
+  await withRelay(async (port) => {
+    const jake = await Client.connect(port);
+    const mallory = await Client.connect(port);
+
+    jake.send({ t: "mbox_put", id: MBOX_A, data: b64("jake's bundle") });
+    assert.deepEqual(await jake.next(), { t: "mbox_ok" });
+
+    // The attack this refuses: swap your keys in for the inviter's and the
+    // invitee pairs with you with no visible symptom at all.
+    mallory.send({ t: "mbox_put", id: MBOX_A, data: b64("mallory's bundle") });
+    assert.equal((await mallory.next()).t, "error");
+
+    jake.send({ t: "mbox_take", id: MBOX_A });
+    assert.deepEqual(await jake.next(), { t: "mbox_data", data: b64("jake's bundle") });
+  });
+});
+
+test("a mailbox expires 24 hours after it was written", async () => {
+  const clock = { ms: 1_700_000_000_000 };
+  await withRelayOnClock(clock, async (port) => {
+    const c = await Client.connect(port);
+
+    c.send({ t: "mbox_put", id: MBOX_A, data: b64("bundle") });
+    assert.deepEqual(await c.next(), { t: "mbox_ok" });
+
+    // One millisecond short of a day is still a live invite.
+    clock.ms += DAY_MS - 1;
+    c.send({ t: "mbox_take", id: MBOX_A });
+    assert.deepEqual(await c.next(), { t: "mbox_data", data: b64("bundle") });
+
+    c.send({ t: "mbox_put", id: MBOX_A, data: b64("bundle") });
+    assert.deepEqual(await c.next(), { t: "mbox_ok" });
+
+    // A day exactly is not.
+    clock.ms += DAY_MS;
+    c.send({ t: "mbox_take", id: MBOX_A });
+    assert.deepEqual(await c.next(), { t: "mbox_empty" });
+
+    // And the expiry really deleted it: the id is free to reuse.
+    c.send({ t: "mbox_put", id: MBOX_A, data: b64("a later invite") });
+    assert.deepEqual(await c.next(), { t: "mbox_ok" });
+    c.send({ t: "mbox_take", id: MBOX_A });
+    assert.deepEqual(await c.next(), { t: "mbox_data", data: b64("a later invite") });
+  });
+});
+
+test("expired mailboxes are swept rather than accumulating", async () => {
+  const clock = { ms: 0 };
+  await withRelayOnClock(clock, async (port) => {
+    const c = await Client.connect(port);
+    const id = (n: number) => n.toString(16).padStart(64, "0");
+
+    for (let i = 0; i < 50; i++) c.send({ t: "mbox_put", id: id(i), data: b64("x") });
+    for (let i = 0; i < 50; i++) assert.deepEqual(await c.next(), { t: "mbox_ok" });
+
+    // Nobody ever claims them. A day later they are gone without a take, which
+    // is what stops an abandoned invite living in memory forever.
+    clock.ms += DAY_MS + 1;
+    for (let i = 0; i < 50; i++) {
+      c.send({ t: "mbox_take", id: id(i) });
+      assert.deepEqual(await c.next(), { t: "mbox_empty" }, `mailbox ${i} outlived its day`);
+    }
+  });
+});
+
+test("the relay refuses to hold more than 10000 mailboxes", async () => {
+  await withRelay(async (port) => {
+    const c = await Client.connect(port);
+    const id = (n: number) => n.toString(16).padStart(64, "0");
+
+    for (let i = 0; i < 10_000; i++) c.send({ t: "mbox_put", id: id(i), data: b64("x") });
+    for (let i = 0; i < 10_000; i++) {
+      assert.deepEqual(await c.next(20_000), { t: "mbox_ok" }, `put ${i} was refused`);
+    }
+
+    // Past the cap a put is refused rather than remembered, so a stranger
+    // cannot grow the relay's heap one mailbox at a time.
+    c.send({ t: "mbox_put", id: id(10_000), data: b64("x") });
+    assert.equal((await c.next()).t, "error");
+
+    // Claiming one frees exactly one slot.
+    c.send({ t: "mbox_take", id: id(0) });
+    assert.equal((await c.next()).t, "mbox_data");
+    c.send({ t: "mbox_put", id: id(10_000), data: b64("x") });
+    assert.deepEqual(await c.next(), { t: "mbox_ok" });
+  });
+});
+
+test("malformed mailbox messages are refused", async () => {
+  await withRelay(async (port) => {
+    const c = await Client.connect(port);
+
+    // An id that is not 64 hex. A fingerprint-length id is not a mailbox id.
+    for (const id of ["", "zz", FP_A, MBOX_A.toUpperCase(), MBOX_A + "a", 42, null]) {
+      c.send({ t: "mbox_put", id, data: b64("x") });
+      assert.equal((await c.next()).t, "error", `put accepted id ${String(id)}`);
+      c.send({ t: "mbox_take", id });
+      assert.equal((await c.next()).t, "error", `take accepted id ${String(id)}`);
+    }
+
+    // Data that is not a non-empty base64 string.
+    for (const data of ["", 42, null, { a: 1 }, "not base64!", "a".repeat(4097)]) {
+      c.send({ t: "mbox_put", id: MBOX_A, data });
+      assert.equal((await c.next()).t, "error", `put accepted data ${JSON.stringify(data)}`);
+    }
+
+    // None of that left anything behind.
+    c.send({ t: "mbox_take", id: MBOX_A });
+    assert.deepEqual(await c.next(), { t: "mbox_empty" });
+
+    // 4096 characters is the boundary and is allowed.
+    c.send({ t: "mbox_put", id: MBOX_A, data: "a".repeat(4096) });
+    assert.deepEqual(await c.next(), { t: "mbox_ok" });
+  });
+});
+
+test("a mailbox never reaches the envelope path", async () => {
+  await withRelay(async (port) => {
+    const a = await Client.connect(port);
+    const b = await Client.connect(port);
+    await a.register(FP_A);
+
+    b.send({ t: "mbox_put", id: MBOX_A, data: b64("a bundle nobody asked for") });
+    assert.deepEqual(await b.next(), { t: "mbox_ok" });
+
+    // A mailbox is only ever readable by someone who names its id. It is not
+    // broadcast, not queued, and not delivered to whoever happens to be online.
+    await a.expectSilence(150);
+  });
+});

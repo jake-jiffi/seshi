@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { startRelay } from "@seshi/relay/server";
-import { generateIdentity, fingerprint } from "@seshi/core/identity";
-import type { Envelope } from "@seshi/core/envelope";
+import { startRelay } from "../../relay/src/server.ts";
+import { generateIdentity, fingerprint } from "../../core/src/identity.ts";
+import type { Envelope } from "../../core/src/envelope.ts";
 import { RelayClient } from "../src/relay-client.ts";
 import type { Contact } from "../src/storage.ts";
 

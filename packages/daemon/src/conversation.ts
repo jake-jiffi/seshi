@@ -16,15 +16,14 @@
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ACTS, LEDGER_STATES, type Act, type Envelope } from "@seshi/core/envelope";
-import { wrapPeerText } from "@seshi/core/escape";
-import { Ledger } from "@seshi/core/ledger";
-import { detect, type Detection } from "@seshi/core/detectors";
+import { ACTS, LEDGER_STATES, type Act, type Envelope } from "../../core/src/envelope.ts";
+import { wrapPeerText } from "../../core/src/escape.ts";
+import { Ledger } from "../../core/src/ledger.ts";
+import { detect, type Detection } from "../../core/src/detectors.ts";
 import { PeerAgent } from "./peer-agent.ts";
 import { tierSettings, type Tier } from "./tiers.ts";
 import { branchNameFor, createWorktree, type Worktree } from "./worktree.ts";
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
+import { createHash } from "node:crypto";
 import type { Contact, ConvoRecord, PublicBrief } from "./storage.ts";
 import type { SeshiNode } from "./node.ts";
 
@@ -411,7 +410,9 @@ export class Conversation {
 
 /** A deterministic UUID for this side of a conversation. */
 export function localSessionId(convoId: string, myFingerprint: string): string {
-  const h = bytesToHex(sha256(utf8ToBytes(`seshi-session:${convoId}:${myFingerprint}`)));
+  const h = createHash("sha256")
+    .update(`seshi-session:${convoId}:${myFingerprint}`, "utf8")
+    .digest("hex");
   // Shape the digest into a v4-looking UUID, which is what --session-id accepts.
   return [
     h.slice(0, 8),

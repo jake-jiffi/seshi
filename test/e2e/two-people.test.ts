@@ -14,9 +14,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startRelay } from "@seshi/relay/server";
-import { SeshiNode } from "@seshi/daemon/node";
-import type { PublicBrief } from "@seshi/daemon/storage";
+import { startRelay } from "../../packages/relay/src/server.ts";
+import { SeshiNode } from "../../packages/daemon/src/node.ts";
+import type { PublicBrief } from "../../packages/daemon/src/storage.ts";
 
 const homes: string[] = [];
 function tmpHome(label: string): string {
@@ -69,8 +69,8 @@ test("two independent identities pair and agree on the same safety words", async
   const { jake, dave } = await twoPeople(t);
 
   // Jake pastes his invite into Slack. Dave pastes it into his terminal.
-  const jakeSaw = dave.pair(jake.invite());
-  const daveSaw = jake.pair(dave.invite());
+  const jakeSaw = dave.pairWithBundle(jake.inviteBundle());
+  const daveSaw = jake.pairWithBundle(dave.inviteBundle());
 
   assert.equal(jakeSaw.contact.name, "jake");
   assert.equal(daveSaw.contact.name, "dave");
@@ -88,8 +88,8 @@ test("two independent identities pair and agree on the same safety words", async
 
 test("a conversation crosses the wire and both sides record it", async (t) => {
   const { jake, dave } = await twoPeople(t);
-  dave.pair(jake.invite());
-  jake.pair(dave.invite());
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
 
   const convo = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
   // Dave joins. Without this his daemon rejects the turn as belonging to a
@@ -124,8 +124,8 @@ test("a conversation crosses the wire and both sides record it", async (t) => {
 
 test("a full back-and-forth alternates and both transcripts agree", async (t) => {
   const { jake, dave } = await twoPeople(t);
-  dave.pair(jake.invite());
-  jake.pair(dave.invite());
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
 
   const convo = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
   joinConvo(dave, convo.id, jake.fingerprint);
@@ -162,15 +162,15 @@ test("a full back-and-forth alternates and both transcripts agree", async (t) =>
 
 test("an unpaired stranger cannot get a message into anyone's conversation", async (t) => {
   const { url, jake, dave } = await twoPeople(t);
-  dave.pair(jake.invite());
-  jake.pair(dave.invite());
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
   const convo = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
 
   // Mallory knows Dave's invite (it is not a secret) and pairs with him
   // one-way. Dave has never paired with her.
   const mallory = await SeshiNode.open({ home: tmpHome("mallory"), relayUrl: url, name: "mallory" });
   t.after(() => mallory.close());
-  mallory.pair(dave.invite());
+  mallory.pairWithBundle(dave.inviteBundle());
 
   const mConvo = mallory.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
   await mallory.send(mConvo.id, {
@@ -200,7 +200,7 @@ test("a contact presenting a new key hard-fails instead of silently re-pairing",
 
   const realJake = await SeshiNode.open({ home: tmpHome("jake1"), relayUrl: url, name: "jake" });
   t.after(() => realJake.close());
-  dave.pair(realJake.invite());
+  dave.pairWithBundle(realJake.inviteBundle());
 
   // A different identity claiming the same display name. Different keys.
   const fakeJake = await SeshiNode.open({ home: tmpHome("jake2"), relayUrl: url, name: "jake" });
@@ -209,12 +209,12 @@ test("a contact presenting a new key hard-fails instead of silently re-pairing",
   // Different fingerprint, so it lands as a separate contact rather than
   // overwriting. The dangerous case is the SAME fingerprint with a new key,
   // which cannot happen here because the fingerprint IS the key.
-  const second = dave.pair(fakeJake.invite());
+  const second = dave.pairWithBundle(fakeJake.inviteBundle());
   assert.notEqual(second.contact.fingerprint, realJake.fingerprint);
   assert.equal(dave.storage.listContacts().length, 2);
 
   // Re-pairing the same person with the same key is idempotent, not an error.
-  const again = dave.pair(realJake.invite());
+  const again = dave.pairWithBundle(realJake.inviteBundle());
   assert.equal(again.contact.fingerprint, realJake.fingerprint);
   assert.equal(dave.storage.listContacts().length, 2);
 });
@@ -223,12 +223,12 @@ test("an invite that lies about its own fingerprint is refused", async (t) => {
   const { jake, dave } = await twoPeople(t);
 
   const decoded = JSON.parse(
-    Buffer.from(jake.invite().slice("seshi1_".length), "base64url").toString("utf8"),
+    Buffer.from(jake.inviteBundle().slice("seshi1_".length), "base64url").toString("utf8"),
   ) as Record<string, string>;
   decoded["fp"] = "0".repeat(decoded["fp"]!.length);
   const forged = `seshi1_${Buffer.from(JSON.stringify(decoded), "utf8").toString("base64url")}`;
 
-  assert.throws(() => dave.pair(forged), /fingerprint does not match/i);
+  assert.throws(() => dave.pairWithBundle(forged), /fingerprint does not match/i);
   assert.equal(dave.storage.listContacts().length, 0);
 });
 
@@ -237,7 +237,7 @@ test("state survives a restart: a new node on the same home keeps its identity a
   const home = tmpHome("persist");
 
   const first = await SeshiNode.open({ home, relayUrl: url, name: "dave" });
-  first.pair(jake.invite());
+  first.pairWithBundle(jake.inviteBundle());
   const fpBefore = first.fingerprint;
   const convo = first.startConvo({ peer: "jake", mode: "teach", brief: BRIEF });
   first.close();
@@ -274,10 +274,10 @@ test("an invite cannot have its sealing key swapped while keeping the fingerprin
   t.after(() => mallory.close());
 
   const real = JSON.parse(
-    Buffer.from(jake.invite().slice("seshi1_".length), "base64url").toString("utf8"),
+    Buffer.from(jake.inviteBundle().slice("seshi1_".length), "base64url").toString("utf8"),
   ) as Record<string, string>;
   const mallorySealPub = JSON.parse(
-    Buffer.from(mallory.invite().slice("seshi1_".length), "base64url").toString("utf8"),
+    Buffer.from(mallory.inviteBundle().slice("seshi1_".length), "base64url").toString("utf8"),
   )["sealPub"] as string;
 
   const tampered = { ...real, sealPub: mallorySealPub };
@@ -286,7 +286,7 @@ test("an invite cannot have its sealing key swapped while keeping the fingerprin
   // If the fingerprint only covers the signing key, this pairs happily and
   // every message Dave sends "to Jake" is encrypted to Mallory instead.
   assert.throws(
-    () => dave.pair(code),
+    () => dave.pairWithBundle(code),
     /fingerprint does not match/i,
     "swapping the sealing key must break the fingerprint",
   );
@@ -295,8 +295,8 @@ test("an invite cannot have its sealing key swapped while keeping the fingerprin
 
 test("a paired peer cannot invent a conversation id on your disk", async (t) => {
   const { jake, dave } = await twoPeople(t);
-  dave.pair(jake.invite());
-  jake.pair(dave.invite());
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
 
   // Jake is genuinely paired, so his signature verifies. He names a
   // conversation Dave never joined.
@@ -312,8 +312,8 @@ test("a paired peer cannot invent a conversation id on your disk", async (t) => 
 
 test("a replayed turn is refused rather than logged twice", async (t) => {
   const { jake, dave } = await twoPeople(t);
-  dave.pair(jake.invite());
-  jake.pair(dave.invite());
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
   const convo = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
   joinConvo(dave, convo.id, jake.fingerprint);
 
@@ -327,4 +327,75 @@ test("a replayed turn is refused rather than logged twice", async (t) => {
   await assert.rejects(() => dave.waitForTurn({ timeoutMs: 1200 }), /timed out/);
   assert.equal(dave.storage.readLog(convo.id, jake.fingerprint).length, 1, "logged exactly once");
   assert.ok(dave.rejects.some((r) => /replayed|fork/.test(r.reason)));
+});
+
+test("an expected contact may open ONE conversation, and only an opening turn", async (t) => {
+  const { jake, dave } = await twoPeople(t);
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
+  dave.verify("jake");
+  dave.storage.putContact({ ...dave.contact("jake"), tier: 2 });
+
+  dave.expectOpenFrom("jake", BRIEF, "decide");
+
+  const convo = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
+  await jake.send(convo.id, { seq: 1, prev: null, act: "BRIEF", headline: "h", body: "opening" });
+
+  const turn = await dave.waitForTurn({ timeoutMs: 5000 });
+  assert.equal(turn.envelope.body, "opening");
+  assert.equal(dave.storage.getConvo(convo.id)?.peer, jake.fingerprint);
+
+  // Disarmed after one. A SECOND conversation is refused.
+  const second = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
+  await jake.send(second.id, { seq: 1, prev: null, act: "BRIEF", headline: "h", body: "another" });
+  await assert.rejects(() => dave.waitForTurn({ timeoutMs: 1200 }), /timed out/);
+  assert.equal(dave.storage.getConvo(second.id), null, "one conversation, then disarmed");
+});
+
+test("expecting refuses to arm for an unverified or tier 1 contact", async (t) => {
+  const { jake, dave } = await twoPeople(t);
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
+
+  assert.throws(() => dave.expectOpenFrom("jake", BRIEF, "decide"), /has not been verified/);
+
+  dave.verify("jake"); // still tier 1
+  assert.throws(() => dave.expectOpenFrom("jake", BRIEF, "decide"), /tier 1|words only/);
+});
+
+test("an expected contact still cannot inject a mid-conversation act as an opener", async (t) => {
+  const { jake, dave } = await twoPeople(t);
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
+  dave.verify("jake");
+  dave.storage.putContact({ ...dave.contact("jake"), tier: 2 });
+  dave.expectOpenFrom("jake", BRIEF, "decide");
+
+  const convo = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
+  // Not a BRIEF. Someone doing something other than starting a conversation.
+  await jake.send(convo.id, { seq: 1, prev: null, act: "PROPOSE", headline: "h", body: "sneaking in" });
+
+  await assert.rejects(() => dave.waitForTurn({ timeoutMs: 1200 }), /timed out/);
+  assert.equal(dave.storage.getConvo(convo.id), null);
+});
+
+test("arming for one contact does not let a DIFFERENT paired contact open", async (t) => {
+  const { url, jake, dave } = await twoPeople(t);
+  const mallory = await SeshiNode.open({ home: tmpHome("mal2"), relayUrl: url, name: "mallory" });
+  t.after(() => mallory.close());
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
+  dave.pairWithBundle(mallory.inviteBundle());
+  mallory.pairWithBundle(dave.inviteBundle());
+  dave.verify("jake");
+  dave.verify("mallory");
+  for (const n of ["jake", "mallory"]) dave.storage.putContact({ ...dave.contact(n), tier: 2 });
+
+  dave.expectOpenFrom("jake", BRIEF, "decide");   // armed for Jake only
+
+  const convo = mallory.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
+  await mallory.send(convo.id, { seq: 1, prev: null, act: "BRIEF", headline: "h", body: "me instead" });
+
+  await assert.rejects(() => dave.waitForTurn({ timeoutMs: 1200 }), /timed out/);
+  assert.equal(dave.storage.getConvo(convo.id), null);
 });

@@ -15,10 +15,11 @@
  *     contact is rejected without ever being opened into the inbox.
  */
 
-import { WebSocket } from "ws";
-import { capEnvelope, openEnvelope, sealEnvelope } from "@seshi/core/envelope";
-import type { Envelope } from "@seshi/core/envelope";
-import type { Identity } from "@seshi/core/identity";
+// No import for WebSocket: Node 24 has one built in, and every dependency the
+// client does not have is an `npm install` the user does not have to run.
+import { capEnvelope, openEnvelope, sealEnvelope } from "../../core/src/envelope.ts";
+import type { Envelope } from "../../core/src/envelope.ts";
+import type { Identity } from "../../core/src/identity.ts";
 import type { Contact } from "./storage.ts";
 
 export type RelayClientOptions = {
@@ -69,17 +70,25 @@ export class RelayClient {
 
     return new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(this.#opts.url);
+      // The relay speaks JSON text frames. A relay that sends the same JSON as
+      // a binary frame still has to be readable, hence the decode below.
+      socket.binaryType = "arraybuffer";
       this.#socket = socket;
 
-      socket.on("open", () => {
+      socket.addEventListener("open", () => {
         socket.send(JSON.stringify({ t: "hello", fp: this.#fingerprint }));
         this.#opts.onStatus?.("open");
         resolve();
       });
 
-      socket.on("message", (data: Buffer | string) => this.#onMessage(String(data)));
+      socket.addEventListener("message", (event) => {
+        const data: unknown = event.data;
+        this.#onMessage(
+          typeof data === "string" ? data : new TextDecoder().decode(data as ArrayBuffer),
+        );
+      });
 
-      socket.on("close", () => {
+      socket.addEventListener("close", () => {
         if (this.#socket === socket) this.#socket = null;
         this.#opts.onStatus?.("closed");
         this.#scheduleReconnect();
@@ -93,9 +102,10 @@ export class RelayClient {
       // down) would print a stack trace from deep inside undici. Noise like
       // that hides real failures, so the error is surfaced through onStatus and
       // the socket is left to its close handler.
-      socket.on("error", (err) => {
+      socket.addEventListener("error", (event) => {
         if (!this.connected) {
-          reject(err);
+          const cause: unknown = (event as { error?: unknown }).error;
+          reject(new Error(`could not reach the relay at ${this.#opts.url}`, { cause }));
           return;
         }
         this.#opts.onStatus?.("closed");
@@ -133,9 +143,15 @@ export class RelayClient {
     if (socket === null || socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error("relay client is not connected"));
     }
-    return new Promise<void>((resolve, reject) => {
-      socket.send(JSON.stringify(message), (err) => (err ? reject(err) : resolve()));
-    });
+    // The built-in WebSocket has no send callback. send() queues the frame and
+    // throws only when the socket is not open, which the guard above covers, so
+    // the throw is caught rather than left to escape as an unhandled rejection.
+    try {
+      socket.send(JSON.stringify(message));
+      return Promise.resolve();
+    } catch (err) {
+      return Promise.reject(err as Error);
+    }
   }
 
   #onMessage(raw: string): void {
@@ -211,4 +227,4 @@ function fingerprintOfIdentity(id: Identity): string {
   return fingerprintFn(id.sign.pub, id.seal.pub);
 }
 
-import { fingerprint as fingerprintFn } from "@seshi/core/identity";
+import { fingerprint as fingerprintFn } from "../../core/src/identity.ts";

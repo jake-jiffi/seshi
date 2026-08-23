@@ -7,33 +7,47 @@
  *
  * PAIRING, and an honest note about what this is.
  *
- * The spec (§8) wants a three-word spoken code backed by a PAKE. This prototype
- * ships something simpler and different in kind: the invite is a base64url
- * bundle of the inviter's PUBLIC keys plus the relay URL. It is not a secret.
- * Leaking it discloses a public key and nothing else, and it cannot be replayed
- * into an impersonation, because possession of the matching private key is
- * proved by every signature thereafter.
+ * There are two paths in and they carry the same bytes.
  *
- * What it does NOT do is prove the bundle came from the person you think. That
- * is what the four safety words are for: both sides derive them from the ECDH
- * shared secret, and they only match if nobody sat in the middle. Confirming
- * them over a different channel is the whole defence, exactly as it is in
- * Signal and SSH. A short spoken code is a UX improvement over this, not a
- * security one, and it belongs in phase 2.
+ *   invite() / joinWithCode()      "seshi join 7-tandem-verdict"
+ *   inviteBundle() / pairWithBundle()   the 300 character seshi1_ blob
+ *
+ * The code path routes the blob through a relay mailbox instead of through the
+ * human. The inviter leaves their bundle in the mailbox derived from the code,
+ * the joiner takes it, leaves their own in the answer mailbox, and the inviter
+ * picks that up. What crosses is identical either way: a bundle of PUBLIC keys
+ * plus the relay URL. It is not a secret. Leaking it discloses a public key and
+ * nothing else, and it cannot be replayed into an impersonation, because
+ * possession of the matching private key is proved by every signature after.
+ *
+ * The code is NOT a PAKE password, and this is the honest gap against spec §8.
+ * A PAKE would put the mailbox contents beyond the relay. A hashed mailbox id
+ * does not: an actively malicious relay can swap the offer for keys of its own,
+ * pocket the answer, and sit in the middle of both sides. So the mailbox does
+ * not improve the relay's trust position at all, and it is not meant to. What
+ * it improves is the human's: a three-word code read aloud beats a blob that
+ * nobody proofreads.
+ *
+ * The four safety words remain the only thing that catches a man in the middle,
+ * on either path. Both sides derive them from the ECDH shared secret and they
+ * agree only if nobody sat between. Confirming them over a different channel is
+ * the whole defence, exactly as it is in Signal and SSH.
  */
 
 import { randomUUID } from "node:crypto";
-import { x25519 } from "@noble/curves/ed25519.js";
 import {
   fingerprint,
   generateIdentity,
   safetyWords,
   type Identity,
-} from "@seshi/core/identity";
-import type { Envelope } from "@seshi/core/envelope";
-import { Chain } from "@seshi/core/chain";
+} from "../../core/src/identity.ts";
+import { sharedSecret } from "../../core/src/identity.ts";
+import type { Envelope } from "../../core/src/envelope.ts";
+import { generateCode, mailboxIds, normaliseCode } from "../../core/src/pairing.ts";
+import { Chain } from "../../core/src/chain.ts";
 import { Storage, type Contact, type ConvoRecord, type PublicBrief } from "./storage.ts";
 import { RelayClient } from "./relay-client.ts";
+import { mailboxPut, mailboxTake } from "./mailbox.ts";
 
 /** Same shape storage enforces, because a fingerprint becomes a directory name. */
 const FINGERPRINT = /^[0-9a-f]{32}$/;
@@ -61,6 +75,35 @@ export type SeshiNodeOptions = {
 
 export type InboundTurn = { envelope: Envelope; contact: Contact };
 
+export type Pairing = { contact: Contact; safetyWords: string[] };
+
+/** What `invite()` hands back: the words to read out, and the wait. */
+export type PendingInvite = {
+  /** e.g. "7-tandem-verdict". Read this to the other person. */
+  code: string;
+  /**
+   * Poll the answer mailbox until the invitee replies. Resolves with the same
+   * pairing a pasted bundle would have produced, or rejects on timeout, having
+   * first taken our own offer back so an abandoned code cannot be spent later.
+   */
+  waitForPeer(opts?: { pollMs?: number; timeoutMs?: number }): Promise<Pairing>;
+};
+
+/** Poll interval and patience for `waitForPeer`, from the brief. */
+const POLL_MS = 2_000;
+const WAIT_MS = 10 * 60_000;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    t.unref?.();
+  });
+
+/** A mailbox carries base64. The bundle is already a string, so this is a
+ *  second encoding and not a second format. */
+const toMailbox = (bundle: string): string => Buffer.from(bundle, "utf8").toString("base64");
+const fromMailbox = (data: string): string => Buffer.from(data, "base64").toString("utf8");
+
 export class SeshiNode {
   readonly storage: Storage;
   readonly identity: Identity;
@@ -73,6 +116,11 @@ export class SeshiNode {
   readonly #waiters: Array<(t: InboundTurn) => void> = [];
   /** One hash chain per (conversation, party). Keyed `${convo}/${party}`. */
   readonly #chains = new Map<string, Chain>();
+  /**
+   * Armed, one contact at a time, while a human is sitting at `seshi join`
+   * waiting for the other side to open. See `expectOpenFrom`.
+   */
+  #expecting: { fingerprint: string; brief: PublicBrief; mode: string } | null = null;
 
   private constructor(opts: SeshiNodeOptions, storage: Storage, identity: Identity) {
     this.storage = storage;
@@ -111,8 +159,84 @@ export class SeshiNode {
     return this.#rejects;
   }
 
+  /**
+   * Start a code pairing.
+   *
+   * Publishes our bundle to the offer mailbox BEFORE returning, so the code is
+   * already live the moment a human reads it out. `name` is our local label for
+   * whoever joins with this code: "seshi invite dave" means the contact ends up
+   * called dave regardless of what their bundle says about itself, which is one
+   * fewer self-asserted string to trust.
+   */
+  async invite(name?: string): Promise<PendingInvite> {
+    const code = generateCode();
+    const box = mailboxIds(code);
+    await mailboxPut(this.#relayUrl, box.offer, toMailbox(this.inviteBundle()));
+    return {
+      code,
+      waitForPeer: (opts = {}) => this.#waitForPeer(box, name, opts),
+    };
+  }
+
+  async #waitForPeer(
+    box: { offer: string; answer: string },
+    name: string | undefined,
+    opts: { pollMs?: number; timeoutMs?: number },
+  ): Promise<Pairing> {
+    const pollMs = opts.pollMs ?? POLL_MS;
+    const deadline = Date.now() + (opts.timeoutMs ?? WAIT_MS);
+    for (;;) {
+      const data = await mailboxTake(this.#relayUrl, box.answer);
+      // parseInvite runs inside pairWithBundle. A mailbox is untrusted
+      // transport exactly like the relay, so what comes out of it gets the
+      // same fingerprint check a pasted blob gets.
+      if (data !== null) return this.pairWithBundle(fromMailbox(data), name);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        // Spend our own offer so a code that leaked into Slack scrollback is
+        // dead when we stop waiting, rather than live for the rest of its TTL.
+        await mailboxTake(this.#relayUrl, box.offer).catch(() => {});
+        throw new Error("nobody joined with that code. Run invite again for a fresh one.");
+      }
+      await sleep(Math.min(pollMs, remaining));
+    }
+  }
+
+  /**
+   * Join a pairing someone else started, using only their spoken code.
+   *
+   * The offer is claimed first and validated before we post anything of our
+   * own, so a code that leads to a garbage bundle costs us nothing.
+   */
+  async joinWithCode(code: string): Promise<Pairing> {
+    const box = mailboxIds(code);
+    const data = await mailboxTake(this.#relayUrl, box.offer);
+    if (data === null) {
+      throw new Error(
+        `no invite is waiting on ${normaliseCode(code)}. Either the code is wrong or expired, ` +
+          `or somebody else claimed it first. A code can only be claimed once, so if they are ` +
+          `sure they just sent it, treat this as an attack: get a fresh code over a different ` +
+          `channel and do not use this one.`,
+      );
+    }
+    const bundle = fromMailbox(data);
+    const parsed = parseInvite(bundle);
+    if (parsed.fp === this.fingerprint) throw new Error("that is your own invite code");
+
+    try {
+      await mailboxPut(this.#relayUrl, box.answer, toMailbox(this.inviteBundle()));
+    } catch (err) {
+      throw new Error(
+        `claimed the invite but could not reply to it: ${(err as Error).message}. Somebody else ` +
+          `has already answered this code, which means they knew it. Treat it as an attack: ` +
+          `get a fresh code over a different channel.`,
+      );
+    }
+    return this.pairWithBundle(bundle, parsed.name);
+  }
+
   /** The string you paste to someone. Public keys only, not a secret. */
-  invite(): string {
+  inviteBundle(): string {
     const bundle: InviteBundle = {
       v: 1,
       fp: this.fingerprint,
@@ -125,10 +249,14 @@ export class SeshiNode {
   }
 
   /**
-   * Accept an invite. Creates the contact locally and hands back the safety
-   * words, which mean nothing until the other person reads theirs aloud.
+   * Accept a pasted invite bundle. Creates the contact locally and hands back
+   * the safety words, which mean nothing until the other person reads theirs
+   * aloud.
+   *
+   * `localName` is what WE call them. When it is absent the contact takes the
+   * name out of the bundle, which is self-asserted and therefore only a label.
    */
-  pair(code: string): { contact: Contact; safetyWords: string[] } {
+  pairWithBundle(code: string, localName?: string): Pairing {
     const bundle = parseInvite(code);
     if (bundle.fp === this.fingerprint) throw new Error("that is your own invite");
 
@@ -146,7 +274,7 @@ export class SeshiNode {
 
     const contact: Contact = {
       fingerprint: bundle.fp,
-      name: bundle.name,
+      name: localName ?? bundle.name,
       signPub: bundle.signPub,
       sealPub: bundle.sealPub,
       tier: existing?.tier ?? this.#defaultTier,
@@ -156,12 +284,17 @@ export class SeshiNode {
     return { contact, safetyWords: this.safetyWordsFor(contact) };
   }
 
+  /** @deprecated Use pairWithBundle. Kept so the CLI keeps compiling. */
+  pair(code: string): Pairing {
+    return this.pairWithBundle(code);
+  }
+
   /**
    * Four words derived from the ECDH shared secret. Both sides compute the same
    * words from opposite ends, and a man in the middle cannot make them agree.
    */
   safetyWordsFor(contact: Contact): string[] {
-    return safetyWords(x25519.getSharedSecret(this.identity.seal.priv, unhex(contact.sealPub)));
+    return safetyWords(sharedSecret(this.identity.seal.priv, unhex(contact.sealPub)));
   }
 
   contact(nameOrFp: string): Contact {
@@ -286,13 +419,17 @@ export class SeshiNode {
    * replay a turn to skew the transcript, the budget and the capitulation rate.
    */
   #deliver(envelope: Envelope, contact: Contact): void {
-    const convo = this.storage.getConvo(envelope.convo);
+    let convo = this.storage.getConvo(envelope.convo);
     if (convo === null) {
-      this.#rejects.push({
-        from: contact.fingerprint,
-        reason: `unknown conversation ${envelope.convo}: we never started or joined it`,
-      });
-      return;
+      const opened = this.#tryOpen(envelope, contact);
+      if (opened === null) {
+        this.#rejects.push({
+          from: contact.fingerprint,
+          reason: `unknown conversation ${envelope.convo}: we never started or joined it`,
+        });
+        return;
+      }
+      convo = opened;
     }
     if (convo.peer !== contact.fingerprint) {
       this.#rejects.push({
@@ -338,6 +475,63 @@ export class SeshiNode {
    * restart and anyone holding a captured frame can replay it afterwards. The
    * append-only log is the durable record, so the chain is derived from it.
    */
+  /**
+   * Let ONE named contact open ONE conversation, once.
+   *
+   * Without this the other person cannot start a conversation at all: their
+   * opening turn names an id we have never seen, and the scoping check refuses
+   * it, correctly. The seamless flow needs someone to be able to say the first
+   * word.
+   *
+   * So the permission is made as small as it can be and still work. It is armed
+   * by a human running `seshi join`, it names exactly one contact, it accepts
+   * exactly one conversation, it disarms the moment that conversation is
+   * created, and it still refuses anyone unverified or below tier 2. Everything
+   * the reviewers found (a stranger materialising directories, a paired peer
+   * injecting into a conversation that is with someone else) stays refused.
+   */
+  expectOpenFrom(nameOrFp: string, brief: PublicBrief, mode: string): void {
+    const contact = this.contact(nameOrFp);
+    if (contact.verifiedAt === null) {
+      throw new Error(
+        `${contact.name} has not been verified. Compare your four safety words with them over a ` +
+          `different channel first, otherwise you are opening a channel to whoever answered.`,
+      );
+    }
+    if (contact.tier < 2) {
+      throw new Error(`${contact.name} is tier ${contact.tier}, which is words only`);
+    }
+    this.#expecting = { fingerprint: contact.fingerprint, brief, mode };
+  }
+
+  stopExpecting(): void {
+    this.#expecting = null;
+  }
+
+  /** The one narrow case where an unknown conversation is allowed to exist. */
+  #tryOpen(envelope: Envelope, contact: Contact): ConvoRecord | null {
+    const expecting = this.#expecting;
+    if (expecting === null) return null;
+    if (expecting.fingerprint !== contact.fingerprint) return null;
+    // Only an OPENING turn. A mid-conversation act naming an unknown id is not
+    // someone starting a conversation, it is someone doing something else.
+    if (envelope.act !== "BRIEF" || envelope.seq !== 1) return null;
+    if (!/^[0-9a-f-]{36}$/i.test(envelope.convo)) return null;
+
+    const record: ConvoRecord = {
+      id: envelope.convo,
+      peer: contact.fingerprint,
+      mode: expecting.mode,
+      state: "live",
+      createdAt: new Date().toISOString(),
+      budget: { turns: 24, warnAt: 16, used: 0 },
+      brief: expecting.brief,
+    };
+    this.storage.putConvo(record);
+    this.#expecting = null; // one conversation, then disarmed
+    return record;
+  }
+
   #chain(convoId: string, party: string): Chain {
     const key = `${convoId}/${party}`;
     let chain = this.#chains.get(key);
@@ -394,3 +588,4 @@ export function parseInvite(code: string): InviteBundle {
   }
   return bundle;
 }
+

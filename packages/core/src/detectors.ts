@@ -13,8 +13,7 @@
  * depending on which agent did the folding.
  */
 
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
+import { createHash } from "node:crypto";
 import type { Act, Envelope } from "./envelope.ts";
 import { Ledger } from "./ledger.ts";
 
@@ -61,7 +60,7 @@ const CAPITULATION_ACTS: readonly Act[] = ["ACCEPT", "CONCEDE"];
  * signature that is not checked against what it signs is decoration.
  */
 export function artefactHash(diff: string): string {
-  return bytesToHex(sha256(utf8ToBytes(canonicaliseArtefact(diff))));
+  return createHash("sha256").update(canonicaliseArtefact(diff), "utf8").digest("hex");
 }
 
 /**

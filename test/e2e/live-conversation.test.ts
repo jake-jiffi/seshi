@@ -17,12 +17,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startRelay } from "@seshi/relay/server";
-import { SeshiNode } from "@seshi/daemon/node";
-import { Conversation } from "@seshi/daemon/conversation";
-import type { PublicBrief } from "@seshi/daemon/storage";
-import type { Envelope } from "@seshi/core/envelope";
-import { detect } from "@seshi/core/detectors";
+import { startRelay } from "../../packages/relay/src/server.ts";
+import { SeshiNode } from "../../packages/daemon/src/node.ts";
+import { Conversation } from "../../packages/daemon/src/conversation.ts";
+import type { PublicBrief } from "../../packages/daemon/src/storage.ts";
+import type { Envelope } from "../../packages/core/src/envelope.ts";
+import { detect } from "../../packages/core/src/detectors.ts";
 
 const LIVE = process.env["SESHI_LIVE"] === "1";
 const dirs: string[] = [];
@@ -69,8 +69,8 @@ test(
     });
 
     // Pair, and confirm the safety words agree.
-    const a = dave.pair(jake.invite());
-    const b = jake.pair(dave.invite());
+    const a = dave.pairWithBundle(jake.inviteBundle());
+    const b = jake.pairWithBundle(dave.inviteBundle());
     assert.deepEqual(a.safetyWords, b.safetyWords);
     console.log(`\n  safety words: ${a.safetyWords.join(" ")}\n`);
 

@@ -1,12 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { ed25519, x25519 } from "@noble/curves/ed25519.js";
-import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
-import { sha256 } from "@noble/hashes/sha2.js";
-import { concatBytes, randomBytes, utf8ToBytes, bytesToUtf8 } from "@noble/hashes/utils.js";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
-import { generateIdentity, fingerprint, type Identity } from "../src/identity.ts";
+import {
+  generateIdentity,
+  generateSealPair,
+  fingerprint,
+  sharedSecret,
+  signBytes,
+  type Identity,
+} from "../src/identity.ts";
 import {
   ACTS,
   BODY_MAX,
@@ -32,43 +36,59 @@ const base = {
 // ---------------------------------------------------------------------------
 // A hostile implementation of the wire format.
 //
-// These helpers deliberately do NOT go through sealEnvelope. They exist so the
-// identity tests below prove that openEnvelope defends itself, rather than
-// proving that our own sender happens to be polite.
+// These helpers deliberately do NOT go through sealEnvelope. They lay the frame
+// out themselves, so the identity tests below prove that openEnvelope defends
+// itself, rather than proving that our own sender happens to be polite. The
+// primitives are shared with src/, but the layout, the signed bytes and the
+// payload are all the attacker's to choose.
 // ---------------------------------------------------------------------------
 
 const EPH_BYTES = 32;
-const NONCE_BYTES = 24;
+const NONCE_BYTES = 12;
 const SIG_BYTES = 64;
+const TAG_BYTES = 16;
+
+const utf8 = (s: string): Uint8Array => new TextEncoder().encode(s);
+const text = (b: Uint8Array): string => new TextDecoder().decode(b);
+const concat = (...parts: Uint8Array[]): Uint8Array => Uint8Array.from(Buffer.concat(parts));
+const aeadKey = (priv: Uint8Array, pub: Uint8Array): Buffer =>
+  createHash("sha256").update(sharedSecret(priv, pub)).digest();
 
 /** Build a frame from arbitrary JSON, signed by whoever, sealed to anyone. */
 function forgeFrame(payload: unknown, signPriv: Uint8Array, toSealPub: Uint8Array): Uint8Array {
-  const jsonBytes = utf8ToBytes(JSON.stringify(payload));
-  const signed = concatBytes(utf8ToBytes(SIGN_DOMAIN), toSealPub, jsonBytes);
-  const sig = ed25519.sign(signed, signPriv);
-  return assemble(concatBytes(sig, jsonBytes), toSealPub);
+  const jsonBytes = utf8(JSON.stringify(payload));
+  const signed = concat(utf8(SIGN_DOMAIN), toSealPub, jsonBytes);
+  const sig = signBytes(signed, signPriv);
+  return assemble(concat(sig, jsonBytes), toSealPub);
 }
 
 /** Seal an already-signed plaintext to a recipient. Used for the forwarding attack. */
 function assemble(plaintext: Uint8Array, toSealPub: Uint8Array): Uint8Array {
-  const ephPriv = x25519.utils.randomSecretKey();
-  const ephPub = x25519.getPublicKey(ephPriv);
-  const key = sha256(x25519.getSharedSecret(ephPriv, toSealPub));
+  const eph = generateSealPair();
   const nonce = randomBytes(NONCE_BYTES);
-  const ct = xchacha20poly1305(key, nonce).encrypt(plaintext);
-  return concatBytes(ephPub, nonce, ct);
+  const cipher = createCipheriv("chacha20-poly1305", aeadKey(eph.priv, toSealPub), nonce, {
+    authTagLength: TAG_BYTES,
+  });
+  const ct = concat(cipher.update(plaintext), cipher.final(), cipher.getAuthTag());
+  return concat(eph.pub, nonce, ct);
 }
 
 /** Peel a frame apart the way a recipient does, without any validation. */
 function peek(wire: Uint8Array, me: Identity): { sig: Uint8Array; jsonBytes: Uint8Array; json: any } {
   const ephPub = wire.subarray(0, EPH_BYTES);
   const nonce = wire.subarray(EPH_BYTES, EPH_BYTES + NONCE_BYTES);
-  const ct = wire.subarray(EPH_BYTES + NONCE_BYTES);
-  const key = sha256(x25519.getSharedSecret(me.seal.priv, ephPub));
-  const pt = xchacha20poly1305(key, nonce).decrypt(ct);
+  const sealed = wire.subarray(EPH_BYTES + NONCE_BYTES);
+  const decipher = createDecipheriv("chacha20-poly1305", aeadKey(me.seal.priv, ephPub), nonce, {
+    authTagLength: TAG_BYTES,
+  });
+  decipher.setAuthTag(sealed.subarray(sealed.length - TAG_BYTES));
+  const pt = concat(
+    decipher.update(sealed.subarray(0, sealed.length - TAG_BYTES)),
+    decipher.final(),
+  );
   const sig = pt.subarray(0, SIG_BYTES);
   const jsonBytes = pt.subarray(SIG_BYTES);
-  return { sig, jsonBytes, json: JSON.parse(bytesToUtf8(jsonBytes)) };
+  return { sig, jsonBytes, json: JSON.parse(text(jsonBytes)) };
 }
 
 // ---------------------------------------------------------------------------
@@ -105,8 +125,8 @@ test("the relay sees no plaintext", () => {
   const a = generateIdentity();
   const b = generateIdentity();
   const wire = sealEnvelope({ ...base, body: "no ops budget" }, a, b.seal.pub);
-  assert.equal(bytesToUtf8(wire).includes("no ops budget"), false);
-  assert.equal(bytesToUtf8(wire).includes("PROPOSE"), false);
+  assert.equal(text(wire).includes("no ops budget"), false);
+  assert.equal(text(wire).includes("PROPOSE"), false);
 });
 
 test("open rejects a tampered ciphertext", () => {
@@ -154,7 +174,7 @@ test("a peer cannot forward somebody else's signed turn on to a third party", ()
 
   const wire = sealEnvelope({ ...base, body: "for bob only" }, a, b.seal.pub);
   const { sig, jsonBytes } = peek(wire, b);
-  const forwarded = assemble(concatBytes(sig, jsonBytes), c.seal.pub);
+  const forwarded = assemble(concat(sig, jsonBytes), c.seal.pub);
 
   assert.throws(() => openEnvelope(forwarded, c, a.sign.pub, a.seal.pub), /signature/i);
 });
@@ -402,8 +422,8 @@ test("open rejects rather than throws a crypto error on a malformed contact key"
 });
 
 test("a chosen ephemeral key cannot be used to smuggle a readable frame in", () => {
-  // Low-order points make x25519 throw; that must land as a decrypt failure,
-  // not as an unhandled curve error escaping openEnvelope.
+  // An all-zero point makes the X25519 derivation throw; that must land as a
+  // decrypt failure, not as an unhandled crypto error escaping openEnvelope.
   const a = generateIdentity();
   const b = generateIdentity();
   const wire = sealEnvelope({ ...base }, a, b.seal.pub);

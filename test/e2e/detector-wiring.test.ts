@@ -20,11 +20,11 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startRelay } from "@seshi/relay/server";
-import { SeshiNode } from "@seshi/daemon/node";
-import { Conversation } from "@seshi/daemon/conversation";
-import type { PublicBrief } from "@seshi/daemon/storage";
-import type { Envelope } from "@seshi/core/envelope";
+import { startRelay } from "../../packages/relay/src/server.ts";
+import { SeshiNode } from "../../packages/daemon/src/node.ts";
+import { Conversation } from "../../packages/daemon/src/conversation.ts";
+import type { PublicBrief } from "../../packages/daemon/src/storage.ts";
+import type { Envelope } from "../../packages/core/src/envelope.ts";
 
 const dirs: string[] = [];
 const tmp = (l: string) => {
@@ -103,8 +103,8 @@ async function twoSides(t: { after: (fn: () => void | Promise<void>) => void }, 
   const url = `ws://127.0.0.1:${relay.port}`;
   const jake = await SeshiNode.open({ home: tmp("jake"), relayUrl: url, name: "jake", defaultTier: 2 });
   const dave = await SeshiNode.open({ home: tmp("dave"), relayUrl: url, name: "dave", defaultTier: 2 });
-  dave.pair(jake.invite());
-  jake.pair(dave.invite());
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
 
   const convo = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
   const side = new Conversation({
@@ -294,7 +294,7 @@ test("tier 3: a peer's agent writes into a throwaway worktree, and the human get
   const dave = await SeshiNode.open({
     home: tmp("dave3"), relayUrl: `ws://127.0.0.1:${relay.port}`, name: "dave", defaultTier: 2,
   });
-  jake.pair(dave.invite());
+  jake.pairWithBundle(dave.inviteBundle());
 
   const convo = jake.startConvo({ peer: "dave", mode: "build", brief: BRIEF });
   const side = new Conversation({
@@ -370,7 +370,7 @@ test("tier 3 without a repo is refused rather than silently downgraded", async (
   const dave = await SeshiNode.open({
     home: tmp("dave4"), relayUrl: `ws://127.0.0.1:${relay.port}`, name: "dave", defaultTier: 2,
   });
-  jake.pair(dave.invite());
+  jake.pairWithBundle(dave.inviteBundle());
   t.after(async () => {
     jake.close();
     dave.close();
@@ -405,7 +405,7 @@ test("mode actually reaches the detectors, so a teach learner is not flagged as 
   const dave = await SeshiNode.open({
     home: tmp("daveteach"), relayUrl: `ws://127.0.0.1:${relay.port}`, name: "dave", defaultTier: 2,
   });
-  jake.pair(dave.invite());
+  jake.pairWithBundle(dave.inviteBundle());
   t.after(async () => {
     jake.close(); dave.close(); await relay.close();
     process.env["PATH"] = originalPath;

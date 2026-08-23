@@ -2,138 +2,162 @@
 /**
  * seshi — your Claude talks to their Claude.
  *
- * Deliberately small. The CLI holds no logic of its own: it opens a SeshiNode,
- * calls one method, and prints. Anything it appears to decide is decided in
- * @seshi/daemon.
+ * Two commands carry the whole product:
+ *
+ *   seshi start dave decide "the thing"   -> spins everything up, prints one link
+ *   seshi join <link> "my angle"          -> one paste, and you are talking
+ *
+ * Everything else is inspection. The CLI holds no logic of its own; it opens a
+ * SeshiNode, calls one method, and prints.
  */
 
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { SeshiNode } from "@seshi/daemon/node";
-import { Conversation } from "@seshi/daemon/conversation";
-import { startRelay } from "@seshi/relay/server";
-import type { Envelope } from "@seshi/core/envelope";
-
-const HOME = process.env["SESHI_HOME"] ?? join(homedir(), ".seshi");
-const RELAY = process.env["SESHI_RELAY"] ?? "ws://127.0.0.1:8787";
+import { createInterface } from "node:readline/promises";
+import { SeshiNode } from "../../daemon/src/node.ts";
+import { Conversation } from "../../daemon/src/conversation.ts";
+import type { PublicBrief } from "../../daemon/src/storage.ts";
+import type { Envelope } from "../../core/src/envelope.ts";
+import { displayName, NO_RELAY_HELP, relayUrl, seshiHome, writeConfig } from "./config.ts";
+import { formatLink, parseLink } from "./link.ts";
+import { serve } from "./serve.ts";
 
 const USAGE = `seshi — your Claude talks to their Claude
 
-  seshi init [name]            create this machine's identity
-  seshi invite                 print the code you paste to someone
-  seshi pair <code>            accept someone's code, then compare safety words
-  seshi verify <name>          record that you confirmed the words out of band
-  seshi contacts               who you are paired with, and at what tier
-  seshi tier <name> <1|2|3>    lower a contact's tier (raising is a file edit, on purpose)
-  seshi talk <name> <mode> <objective>
-                               START a conversation. mode: teach | decide | build | review
-                               Prints the one line the other person runs.
-  seshi join <name> <convo-id> <objective>
-                               JOIN a conversation they started, with your own objective
-  seshi convos                 conversations on this machine
-  seshi decision <convo-id>    print the artefact
-  seshi relay [port]           run a relay (default 8787)
+  seshi start <name> <mode> "<objective>"
+        Start a conversation. Prints the single line you send the other person.
+        Modes: teach | decide | build | review
 
-Environment:
-  SESHI_HOME   default ${join("~", ".seshi")}
-  SESHI_RELAY  default ws://127.0.0.1:8787
+  seshi join <link> "<your objective>"
+        The other side. One paste, and you are talking.
+
+  seshi serve                 run a relay and print its address
+  seshi use <wss://...>       point at someone else's relay
+  seshi contacts              who you are paired with
+  seshi trust <name> <1|2|3>  set what a contact's agent may do
+  seshi convos                conversations on this machine
+  seshi decision <id>         read what a conversation produced
+  seshi whoami                this machine's identity
+
+Node 24+. No npm install, no API key. Each side thinks on its own subscription.
 `;
 
+const MODES = ["teach", "decide", "build", "review"];
+
+/**
+ * `--yes` skips the safety-word prompt. It does NOT skip the safety words.
+ *
+ * It exists because the Claude Code skill shows the words in chat and asks the
+ * human there, so a second prompt on a pipe would deadlock. Anything that
+ * passes this is asserting a human has already read the words and said they
+ * match. Nothing else may pass it.
+ */
+const ASSUME_YES = process.argv.includes("--yes");
+
+async function ask(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await rl.question(question)).trim();
+  } finally {
+    rl.close();
+  }
+}
+
+const out = (s: string): void => void process.stdout.write(s);
+const rule = (): void => out(`  ${"-".repeat(64)}\n`);
+
+function briefFrom(objective: string): PublicBrief {
+  return {
+    objective,
+    definitionOfDone: [`both sides sign one decision on: ${objective}`],
+    nonNegotiables: [{ text: objective, reason: "stated as the point of this conversation" }],
+    facts: [],
+  };
+}
+
 async function main(argv: string[]): Promise<number> {
-  const [cmd, ...args] = argv;
+  const [cmd, ...args] = argv.filter((a) => a !== "--yes");
+  if (cmd === undefined || ["help", "--help", "-h"].includes(cmd)) {
+    out(USAGE);
+    return 0;
+  }
+  if (cmd === "--version" || cmd === "-v") {
+    out("seshi 0.2.0\n");
+    return 0;
+  }
+  if (cmd === "serve") return await serve(Number(args[0] ?? 8787));
 
-  if (cmd === undefined || cmd === "help" || cmd === "--help" || cmd === "-h") {
-    process.stdout.write(USAGE);
+  if (cmd === "use") {
+    const url = args[0];
+    if (url === undefined) throw new Error("usage: seshi use wss://...");
+    writeConfig({ relay: url.replace(/^https:/, "wss:").replace(/^http:/, "ws:") });
+    out(`  relay set to ${relayUrl()}\n`);
     return 0;
   }
 
-  // The relay needs no identity, so it is handled before a node is opened.
-  if (cmd === "relay") {
-    const port = Number(args[0] ?? 8787);
-    const relay = await startRelay({ port });
-    process.stdout.write(`seshi relay listening on ws://0.0.0.0:${relay.port}\n`);
-    process.stdout.write(`It sees ciphertext and routing fingerprints. Nothing else.\n`);
-    await new Promise(() => {}); // run until killed
-    return 0;
+  // `join` carries its own relay inside the link, so it runs before the relay
+  // check that every other command needs.
+  if (cmd === "join") {
+    const link = args[0];
+    if (link === undefined) throw new Error('usage: seshi join <link> "<your objective>"');
+    return await join(link, args.slice(1).join(" "));
   }
 
-  const node = await SeshiNode.open({
-    home: HOME,
-    relayUrl: RELAY,
-    name: process.env["SESHI_NAME"] ?? args[0] ?? homedir().split("/").pop() ?? "someone",
-  });
+  const relay = relayUrl();
+  if (relay === null) {
+    process.stderr.write(`${NO_RELAY_HELP}\n`);
+    return 1;
+  }
 
+  const node = await SeshiNode.open({ home: seshiHome(), relayUrl: relay, name: displayName() });
+  const holdOpen = cmd === "start";
   try {
     switch (cmd) {
-      case "init": {
-        process.stdout.write(`identity ready in ${HOME}\n`);
-        process.stdout.write(`you are ${node.fingerprint}\n`);
+      case "whoami":
+        out(`  ${node.name}  ${node.fingerprint}\n  relay ${relay}\n  home  ${seshiHome()}\n`);
+        return 0;
+
+      case "contacts": {
+        const all = node.storage.listContacts();
+        if (all.length === 0) {
+          out(`  nobody yet. run: seshi start <their-name> decide "<what you need to settle>"\n`);
+          return 0;
+        }
+        for (const c of all) {
+          const state = c.verifiedAt === null ? "UNVERIFIED" : "verified";
+          out(`  ${c.name.padEnd(14)} tier ${c.tier}  ${state.padEnd(11)}${c.fingerprint}\n`);
+        }
         return 0;
       }
 
-      case "invite": {
-        process.stdout.write(`${node.invite()}\n\n`);
-        process.stdout.write(`Send that to the person you want to talk to. It is not a secret:\n`);
-        process.stdout.write(`it carries public keys only. When they paste it back, you will both\n`);
-        process.stdout.write(`see four words. Read them to each other before you raise their tier.\n`);
-        return 0;
-      }
-
-      case "pair": {
-        const code = args[0];
-        if (code === undefined) throw new Error("usage: seshi pair <code>");
-        const { contact, safetyWords } = node.pair(code);
-        process.stdout.write(`paired with ${contact.name} (${contact.fingerprint})\n`);
-        process.stdout.write(`tier ${contact.tier}\n\n`);
-        process.stdout.write(`  ${safetyWords.join("  ")}\n\n`);
-        process.stdout.write(`Both of you must see those four words, in that order. If they differ,\n`);
-        process.stdout.write(`someone is in the middle. Confirm over a different channel, then run\n`);
-        process.stdout.write(`  seshi verify ${contact.name}\n`);
+      case "trust": {
+        const [who, raw] = args;
+        if (who === undefined || raw === undefined) {
+          throw new Error("usage: seshi trust <name> <1|2|3>");
+        }
+        const tier = Number(raw);
+        if (![1, 2, 3].includes(tier)) throw new Error("tier must be 1, 2 or 3");
+        const c = node.contact(who);
+        if (tier > 1 && c.verifiedAt === null) {
+          process.stderr.write(
+            `${c.name} has not been verified. Compare your four safety words with them over a\n` +
+              `channel other than the one that sent the link, then run: seshi verify ${c.name}\n`,
+          );
+          return 1;
+        }
+        node.storage.putContact({ ...c, tier: tier as 1 | 2 | 3 });
+        out(`  ${c.name} is now tier ${tier}\n`);
         return 0;
       }
 
       case "verify": {
         const who = args[0];
         if (who === undefined) throw new Error("usage: seshi verify <name>");
-        const c = node.verify(who);
-        process.stdout.write(`${c.name} verified at ${c.verifiedAt}\n`);
-        return 0;
-      }
-
-      case "contacts": {
-        const all = node.storage.listContacts();
-        if (all.length === 0) {
-          process.stdout.write(`nobody yet. run \`seshi invite\` and send the code to someone.\n`);
-          return 0;
-        }
-        for (const c of all) {
-          const v = c.verifiedAt === null ? "UNVERIFIED" : "verified";
-          process.stdout.write(`  ${c.name.padEnd(16)} tier ${c.tier}  ${v.padEnd(10)} ${c.fingerprint}\n`);
-        }
-        return 0;
-      }
-
-      case "tier": {
-        const [who, raw] = args;
-        if (who === undefined || raw === undefined) throw new Error("usage: seshi tier <name> <1|2|3>");
-        const wanted = Number(raw);
-        const c = node.contact(who);
-        if (wanted > c.tier) {
-          process.stderr.write(
-            `refusing to raise ${c.name} from tier ${c.tier} to ${wanted}.\n` +
-              `Raising a tier is a decision a person makes at their own keyboard, so it is a\n` +
-              `hand edit: ${node.storage.contactDir(c.fingerprint)}/contact.json\n`,
-          );
-          return 1;
-        }
-        node.storage.putContact({ ...c, tier: wanted as 1 | 2 | 3 });
-        process.stdout.write(`${c.name} is now tier ${wanted}\n`);
+        out(`  ${node.verify(who).name} verified\n`);
         return 0;
       }
 
       case "convos": {
         for (const c of node.storage.listConvos()) {
-          process.stdout.write(`  ${c.id}  ${c.mode.padEnd(7)} ${c.state.padEnd(6)} ${c.brief.objective}\n`);
+          out(`  ${c.id}  ${c.mode.padEnd(7)} ${c.state.padEnd(6)} ${c.brief.objective}\n`);
         }
         return 0;
       }
@@ -146,26 +170,18 @@ async function main(argv: string[]): Promise<number> {
           process.stderr.write(`no decision written for ${id} yet\n`);
           return 1;
         }
-        process.stdout.write(`${md}\n`);
+        out(`${md}\n`);
         return 0;
       }
 
-      case "talk": {
-        const [who, mode, ...rest] = args;
-        const objective = rest.join(" ");
+      case "start": {
+        const [who, mode] = args;
+        const objective = args.slice(2).join(" ");
         if (who === undefined || mode === undefined || objective === "") {
-          throw new Error('usage: seshi talk <name> <teach|decide|build|review> "<objective>"');
+          throw new Error('usage: seshi start <name> <teach|decide|build|review> "<objective>"');
         }
-        return await converse(node, { who, mode, objective, opensFirst: true });
-      }
-
-      case "join": {
-        const [who, convoId, ...rest] = args;
-        const objective = rest.join(" ");
-        if (who === undefined || convoId === undefined || objective === "") {
-          throw new Error('usage: seshi join <name> <convo-id> "<your objective>"');
-        }
-        return await converse(node, { who, convoId, objective, opensFirst: false });
+        if (!MODES.includes(mode)) throw new Error(`mode must be one of: ${MODES.join(", ")}`);
+        return await start(node, relay, who, mode, objective);
       }
 
       default:
@@ -173,129 +189,154 @@ async function main(argv: string[]): Promise<number> {
         return 1;
     }
   } finally {
-    if (cmd !== "talk" && cmd !== "join") node.close();
+    if (!holdOpen) node.close();
   }
 }
 
-/**
- * Run one side of a conversation and stream it.
- *
- * Both people run this. The only difference is who speaks first: the starter
- * opens from its own brief, the joiner waits. Everything else — the tier gates,
- * the detector reporting, the interrupt, the artefact — is identical, because
- * neither side is authoritative over the other.
- */
-async function converse(
+/** Pair if we have to, confirm the words, then open the conversation. */
+async function start(
   node: SeshiNode,
-  opts: { who: string; mode?: string; convoId?: string; objective: string; opensFirst: boolean },
+  relay: string,
+  who: string,
+  mode: string,
+  objective: string,
 ): Promise<number> {
-  const peer = node.contact(opts.who);
-  if (peer.tier === 1) {
-    process.stderr.write(
-      `${peer.name} is tier 1, which is words only: no Claude process is spawned for them.\n` +
-        `That is the safe default for a new contact. Raise it once you have compared safety words.\n`,
-    );
-    return 1;
+  let contact = node.storage.listContacts().find((c) => c.name === who) ?? null;
+
+  if (contact === null) {
+    const pending = await node.invite(who);
+    out("\n");
+    rule();
+    out(`  Send ${who} this line. It is not a secret.\n\n`);
+    out(`      /seshi join ${formatLink(pending.code, relay)}\n\n`);
+    rule();
+    out(`\n  waiting for ${who} to join...\n`);
+
+    const paired = await pending.waitForPeer();
+    if (!(await confirmWords(paired.safetyWords, paired.contact.name))) return 1;
+    node.verify(paired.contact.fingerprint);
+    node.storage.putContact({ ...node.contact(paired.contact.fingerprint), tier: 2 });
+    contact = node.contact(paired.contact.fingerprint);
   }
-  if (peer.verifiedAt === null) {
+
+  if (contact.verifiedAt === null || contact.tier < 2) {
+    const unverified = contact.verifiedAt === null ? " and unverified" : "";
     process.stderr.write(
-      `${peer.name} has not been verified. Compare your four safety words with them over a\n` +
-        `channel other than the one that sent the invite, then run \`seshi verify ${peer.name}\`.\n`,
+      `${contact.name} is tier ${contact.tier}${unverified}.\n` +
+        `Compare safety words, then: seshi trust ${contact.name} 2\n`,
     );
     return 1;
   }
 
-  // A brief with no non-negotiables seeds an EMPTY ledger, and an empty ledger
-  // makes half the convergence machinery structurally dead. So the objective
-  // itself becomes the first issue. It is a weak brief and seshi says so.
-  const brief = {
-    objective: opts.objective,
-    definitionOfDone: [`both sides sign one decision on: ${opts.objective}`],
-    nonNegotiables: [{ text: opts.objective, reason: "stated as the point of this conversation" }],
-    facts: [],
-  };
+  const convo = node.startConvo({ peer: contact.fingerprint, mode, brief: briefFrom(objective) });
+  const side = new Conversation({
+    node,
+    convo,
+    peer: contact,
+    scopedDir: node.storage.convoDir(convo.id),
+    ...(contact.tier === 3 ? { repo: process.cwd() } : {}),
+  });
 
-  // The starter mints the id. The joiner is told it out of band, which is what
-  // keeps a peer from materialising conversations on your disk uninvited.
-  const mode = opts.mode ?? node.storage.getConvo(opts.convoId ?? "")?.mode ?? "decide";
-  let convo;
-  if (opts.opensFirst) {
-    convo = node.startConvo({ peer: peer.fingerprint, mode, brief });
-  } else {
-    const id = opts.convoId!;
-    if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error(`that does not look like a conversation id: ${id}`);
-    node.storage.putConvo({
-      id,
-      peer: peer.fingerprint,
-      mode,
-      state: "live",
-      createdAt: new Date().toISOString(),
-      budget: { turns: 24, warnAt: 16, used: 0 },
-      brief,
-    });
-    convo = node.storage.getConvo(id)!;
+  out(`\n  ${mode} with ${contact.name}\n  ${objective}\n\n  starting your agent...\n`);
+  await side.open();
+
+  const opening = await side.openingTurn();
+  print("you", opening);
+  await node.send(convo.id, opening);
+
+  return await runLoop(node, side, contact.name, convo.id, convo.budget.turns);
+}
+
+/** One paste: sets the relay, pairs, confirms, and waits for their opening. */
+async function join(link: string, objective: string): Promise<number> {
+  const { code, relay } = parseLink(link);
+  writeConfig({ relay });
+
+  const node = await SeshiNode.open({ home: seshiHome(), relayUrl: relay, name: displayName() });
+  out(`\n  relay ${relay}\n  pairing with ${code}...\n`);
+
+  const paired = await node.joinWithCode(code);
+  if (!(await confirmWords(paired.safetyWords, paired.contact.name))) {
+    node.close();
+    return 1;
   }
+  node.verify(paired.contact.fingerprint);
+  node.storage.putContact({ ...node.contact(paired.contact.fingerprint), tier: 2 });
+  const contact = node.contact(paired.contact.fingerprint);
+
+  const stated =
+    objective !== ""
+      ? objective
+      : await ask("\n  What do YOU want out of this? (your own angle, in your words)\n  > ");
+  if (stated === "") {
+    process.stderr.write("  a conversation needs your objective, not just theirs.\n");
+    node.close();
+    return 1;
+  }
+
+  // Armed for exactly this contact, exactly one conversation, then disarmed.
+  node.expectOpenFrom(contact.fingerprint, briefFrom(stated), "decide");
+  out(`\n  waiting for ${contact.name} to open...\n`);
+
+  const first = await node.waitForTurn({ timeoutMs: 600_000 });
+  const convo = node.storage.getConvo(first.envelope.convo);
+  if (convo === null) throw new Error("their opening turn did not open a conversation");
 
   const side = new Conversation({
     node,
     convo,
-    peer,
+    peer: contact,
     scopedDir: node.storage.convoDir(convo.id),
-    ...(peer.tier === 3 ? { repo: process.cwd() } : {}),
+    ...(contact.tier === 3 ? { repo: process.cwd() } : {}),
   });
-  if (peer.tier === 3) {
-    process.stdout.write(
-      `  tier 3: their agent may PROPOSE writes into a throwaway worktree cut from\n` +
-        `  ${process.cwd()}. Your checkout is not touched. You get a patch.\n`,
-    );
-  }
-
-  process.stdout.write(`\n  ${mode} with ${peer.name}\n  ${opts.objective}\n`);
-  if (opts.opensFirst) {
-    process.stdout.write(
-      `\n  Send ${peer.name} this line, then wait. Nothing happens until they run it:\n\n` +
-        `    seshi join ${node.name} ${convo.id} "<their own objective>"\n\n`,
-    );
-  }
-  process.stdout.write(`  starting your agent...\n`);
+  out(`  ${convo.mode} with ${contact.name}\n  starting your agent...\n`);
   await side.open();
 
-  const stop = () => {
+  print(contact.name, first.envelope);
+  side.observe(first.envelope);
+  const reply = await side.replyTo(first.envelope);
+  print("you", reply);
+  await node.send(convo.id, reply);
+
+  return await runLoop(node, side, contact.name, convo.id, convo.budget.turns);
+}
+
+/** The half both sides share: read a turn, report detectors, answer, repeat. */
+async function runLoop(
+  node: SeshiNode,
+  side: Conversation,
+  peerName: string,
+  convoId: string,
+  turns: number,
+): Promise<number> {
+  const stop = (): void => {
     side.discardWorktree();
     side.stop();
     node.close();
   };
   process.on("SIGINT", () => {
-    process.stdout.write("\n  interrupted. writing what we have.\n");
+    out("\n  interrupted. writing what we have.\n");
     side.writeDecision(side.detections());
     stop();
     process.exit(0);
   });
 
-  if (opts.opensFirst) {
-    const opening = await side.openingTurn();
-    print("you", opening);
-    await node.send(convo.id, opening);
-  } else {
-    process.stdout.write(`  waiting for ${peer.name} to speak...\n`);
-  }
-
-  for (let i = 0; i < convo.budget.turns; i += 1) {
+  for (let i = 0; i < turns; i += 1) {
     let inbound;
     try {
       inbound = await node.waitForTurn({ timeoutMs: 600_000 });
     } catch {
-      process.stdout.write(`\n  ${peer.name} went quiet. Writing what we have.\n`);
+      out(`\n  ${peerName} went quiet. Writing what we have.\n`);
       break;
     }
-    print(peer.name, inbound.envelope);
+    print(peerName, inbound.envelope);
     const found = side.observe(inbound.envelope);
 
     for (const d of found) {
-      process.stdout.write(`  ! ${d.kind}: ${d.because}\n`);
+      out(`  ! ${d.kind}: ${d.because}\n`);
       if (d.kind === "agreement" || d.kind === "deadlock") {
         side.writeDecision(found);
-        process.stdout.write(`\n  ${d.kind}. written to convos/${convo.id}/DECISION.md\n`);
+        out(`\n  ${d.kind}. read it with:  seshi decision ${convoId}\n`);
         stop();
         return 0;
       }
@@ -303,19 +344,45 @@ async function converse(
 
     const reply = await side.replyTo(inbound.envelope);
     print("you", reply);
-    await node.send(convo.id, reply);
+    await node.send(convoId, reply);
     if (reply.act === "CLOSE") break;
   }
 
   side.writeDecision(side.detections());
-  process.stdout.write(`\n  done. written to convos/${convo.id}/DECISION.md\n`);
-  process.stdout.write(`  read it with: seshi decision ${convo.id}\n`);
+  out(`\n  done. read it with:  seshi decision ${convoId}\n`);
   stop();
   return 0;
 }
 
+/**
+ * The only unskippable ceremony in the product, and the only thing standing
+ * between the two of you and someone in the middle.
+ */
+async function confirmWords(words: string[], name: string): Promise<boolean> {
+  out("\n");
+  rule();
+  out(`  Paired with ${name}. You should both see these four words:\n\n`);
+  out(`      ${words.join("   ")}\n\n`);
+  out(`  Read them to each other OUT LOUD, on a call or in person.\n`);
+  out(`  Not in the chat you sent the link through.\n`);
+  rule();
+  if (ASSUME_YES) {
+    out("\n  (--yes: taking it that a human has confirmed these match)\n");
+    return true;
+  }
+  const answer = await ask("\n  Do they match on both sides? [y/N] ");
+  if (!/^y(es)?$/i.test(answer)) {
+    process.stderr.write(
+      "\n  Stopping, and nothing was trusted.\n" +
+        "  If the words differ, someone is between you. Start again with a fresh link.\n",
+    );
+    return false;
+  }
+  return true;
+}
+
 function print(who: string, e: Envelope): void {
-  process.stdout.write(`  ${who.padEnd(10)} ${e.act.padEnd(15)} ${e.headline}\n`);
+  out(`  ${who.padEnd(10)} ${e.act.padEnd(15)} ${e.headline}\n`);
 }
 
 main(process.argv.slice(2))
