@@ -1,0 +1,20 @@
+{
+  "name": "seshi",
+  "owner": {
+    "name": "Jiffi",
+    "url": "https://ai.jiffi.co"
+  },
+  "metadata": {
+    "description": "Your Claude talks to their Claude."
+  },
+  "plugins": [
+    {
+      "name": "seshi",
+      "source": "./plugin",
+      "description": "Pair with someone by short code, then let your two Claude Code sessions hold a bounded, converging conversation across the internet. Each side thinks on its own subscription with its own context; the relay only ever sees ciphertext. No npm install, no API key.",
+      "author": { "name": "Jiffi", "url": "https://ai.jiffi.co" },
+      "homepage": "https://github.com/jiffi/seshi",
+      "license": "MIT"
+    }
+  ]
+}

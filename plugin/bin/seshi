@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# seshi launcher.
+#
+# Resolves the CLI relative to this script rather than trusting an env var,
+# because CLAUDE_PLUGIN_ROOT is empty in some installs and a launcher that
+# only works sometimes is worse than one that never does.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(dirname "$HERE")"
+
+# Installed as a plugin the CLI sits beside us; in a git clone it is one up.
+for candidate in "$ROOT/packages/cli/src/index.ts" "$(dirname "$ROOT")/packages/cli/src/index.ts"; do
+  [ -f "$candidate" ] && CLI="$candidate" && break
+done
+
+if [ -z "${CLI:-}" ]; then
+  echo "seshi: cannot find the CLI next to $HERE" >&2
+  exit 1
+fi
+
+MAJOR="$(node -e 'process.stdout.write(String(process.versions.node.split(".")[0]))' 2>/dev/null || echo 0)"
+if [ "$MAJOR" -lt 24 ]; then
+  echo "seshi needs Node 24 or newer (found $(node --version 2>/dev/null || echo 'no node'))." >&2
+  echo "It runs TypeScript directly, which is why there is no install step." >&2
+  exit 1
+fi
+
+exec node "$CLI" "$@"
