@@ -18,7 +18,6 @@ import type { PublicBrief } from "../../daemon/src/storage.ts";
 import type { Envelope } from "../../core/src/envelope.ts";
 import { displayName, NO_RELAY_HELP, relayUrl, seshiHome, writeConfig } from "./config.ts";
 import { formatLink, parseLink } from "./link.ts";
-import { serve } from "./serve.ts";
 
 const USAGE = `seshi — your Claude talks to their Claude
 
@@ -83,7 +82,15 @@ async function main(argv: string[]): Promise<number> {
     out("seshi 0.2.0\n");
     return 0;
   }
-  if (cmd === "serve") return await serve(Number(args[0] ?? 8787));
+  if (cmd === "serve") {
+    // Imported lazily and ONLY here. `serve` reaches the relay, and the relay
+    // is the one part of seshi that needs a dependency (`ws`, because Node has
+    // a WebSocket client but no server). Importing it at the top meant a clean
+    // clone could not even print its help, which is a rotten first impression
+    // for a tool whose whole pitch is that it needs no install.
+    const { serve } = await import("./serve.ts");
+    return await serve(Number(args[0] ?? 8787));
+  }
 
   if (cmd === "use") {
     const url = args[0];

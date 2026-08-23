@@ -12,7 +12,6 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { startRelay } from "../../relay/src/server.ts";
 
 type Tunnel = { url: string; child: ChildProcess; tool: string };
 
@@ -69,6 +68,22 @@ function openTunnel(port: number, timeoutMs = 45_000): Promise<Tunnel | null> {
 }
 
 export async function serve(port: number): Promise<number> {
+  // The only dependency in the whole project, and only the person hosting ever
+  // needs it. Everyone else runs seshi with nothing installed at all.
+  let startRelay: (o: { port: number }) => Promise<{ port: number; close(): Promise<void> }>;
+  try {
+    ({ startRelay } = await import("../../relay/src/server.ts"));
+  } catch (err) {
+    if (!/Cannot find package 'ws'/.test((err as Error).message)) throw err;
+    process.stderr.write(
+      `\n  Running a relay needs one package, because Node ships a WebSocket client\n` +
+        `  but not a server. Install it once, here in the seshi directory:\n\n` +
+        `      npm install\n\n` +
+        `  Only the person hosting needs this. Everyone joining needs nothing.\n`,
+    );
+    return 1;
+  }
+
   const relay = await startRelay({ port });
   const local = `ws://127.0.0.1:${relay.port}`;
 
