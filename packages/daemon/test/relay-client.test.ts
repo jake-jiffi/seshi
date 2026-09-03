@@ -183,3 +183,92 @@ test("caps are applied before sealing, so an oversized body cannot reach the wir
   const got = await until(() => w.daveInbox[0]);
   assert.equal(got.envelope.body.length, 1200);
 });
+
+test("a send during a dropped socket waits for the reconnect instead of failing", async (t) => {
+  const relay = await startRelay({ port: 0 });
+  const url = `ws://127.0.0.1:${relay.port}`;
+  const jakeId = generateIdentity();
+  const daveId = generateIdentity();
+  const jakeContact = contactFor(jakeId, "jake");
+  const daveContact = contactFor(daveId, "dave");
+  const daveInbox: Array<{ envelope: Envelope; contact: Contact }> = [];
+  const jake = new RelayClient({
+    url,
+    identity: jakeId,
+    reconnectMs: 50,
+    resolveContact: (fp) => (fp === daveContact.fingerprint ? daveContact : null),
+    onEnvelope: () => {},
+  });
+  const dave = new RelayClient({
+    url,
+    identity: daveId,
+    resolveContact: (fp) => (fp === jakeContact.fingerprint ? jakeContact : null),
+    onEnvelope: (envelope, contact) => daveInbox.push({ envelope, contact }),
+  });
+  t.after(async () => {
+    jake.close();
+    dave.close();
+    await relay.close();
+  });
+  await jake.connect();
+  await dave.connect();
+
+  // Knock jake off the relay the way an idle proxy would, using the relay's
+  // own rule that a fresh hello for a fingerprint closes the previous socket.
+  const squatter = new WebSocket(url);
+  await new Promise((r) => squatter.addEventListener("open", r));
+  squatter.send(JSON.stringify({ t: "hello", fp: jakeContact.fingerprint }));
+  await until(() => (jake.connected ? undefined : true));
+  squatter.close();
+
+  // Sent inside the gap, before the reconnect timer has fired.
+  await jake.send(daveContact, envelope("c1", 1, "sent in the gap"));
+  const got = await until(() => daveInbox[0]);
+  assert.equal(got.envelope.body, "sent in the gap");
+});
+
+test("the client pings while idle, so a proxy never sees an idle socket", async (t) => {
+  const { WebSocketServer } = await import("ws");
+  const wss = new WebSocketServer({ port: 0 });
+  await new Promise((r) => wss.once("listening", r));
+  let pings = 0;
+  wss.on("connection", (s) =>
+    s.on("message", (d) => {
+      if ((JSON.parse(String(d)) as { t?: string }).t === "ping") pings += 1;
+    }),
+  );
+  const port = (wss.address() as { port: number }).port;
+  const c = new RelayClient({
+    url: `ws://127.0.0.1:${port}`,
+    identity: generateIdentity(),
+    keepaliveMs: 20,
+    resolveContact: () => null,
+    onEnvelope: () => {},
+  });
+  t.after(() => {
+    c.close();
+    wss.close();
+  });
+  await c.connect();
+  await until(() => (pings >= 3 ? pings : undefined));
+});
+
+test("a daemon that throws while filing a turn produces a reject, not a crash", async (t) => {
+  const w = await pair();
+  t.after(() => w.close());
+  const boom = new RelayClient({
+    url: w.url,
+    identity: w.daveId,
+    resolveContact: (fp) => (fp === w.jakeContact.fingerprint ? w.jakeContact : null),
+    onEnvelope: () => {
+      throw new Error("corrupt record in log");
+    },
+    onReject: (from, reason) => w.daveRejects.push({ from, reason }),
+  });
+  t.after(() => boom.close());
+  await w.jake.connect();
+  await boom.connect();
+  await w.jake.send(w.daveContact, envelope("c1", 1, "hello"));
+  const r = await until(() => w.daveRejects[0]);
+  assert.match(r.reason, /could not file the turn: corrupt record/);
+});

@@ -433,3 +433,59 @@ test("mode actually reaches the detectors, so a teach learner is not flagged as 
     `a teach learner accepting what it is taught must not be flagged: ${JSON.stringify(found.map((d) => d.because))}`,
   );
 });
+
+test("a peer declaring an issue agreed on its own does not make it a decision", async (t) => {
+  const { jake, convo, side } = await twoSides(t, [
+    JSON.stringify({ act: "BRIEF", headline: "opening", body: "my position" }),
+    JSON.stringify({
+      act: "COUNTER",
+      headline: "no",
+      body: "I do not agree with that",
+      ledger: [{ id: "i-01", state: "proposed" }],
+    }),
+  ]);
+  const daveFp = jake.contact("dave").fingerprint;
+  await side.openingTurn();
+  const proposal = fromPeer(convo.id, 1, {
+    from: daveFp, act: "PROPOSE", headline: "p", body: "b",
+    ledger: [{ id: "i-01", state: "proposed" }],
+  });
+  side.observe(proposal);
+  await side.replyTo(proposal);
+  // The peer now unilaterally calls it agreed. The transition is legal, so the
+  // ledger moves, and the artefact used to print it as a decision we signed.
+  side.observe(fromPeer(convo.id, 2, {
+    from: daveFp, act: "ACCEPT", headline: "done", body: "agreed then",
+    ledger: [{ id: "i-01", state: "agreed" }],
+  }));
+  assert.equal(side.ledger.get("i-01")?.state, "agreed", "the ledger itself moves on a legal transition");
+
+  const md = side.writeDecision();
+  assert.match(md, /_No issue reached agreement/, "one side's say-so must not become a decision");
+  assert.match(md, /\[agreed by one side only\] no new infrastructure/, "and the artefact says which side");
+});
+
+test("an issue both sides' latest ledger views call agreed is a decision", async (t) => {
+  const { jake, convo, side } = await twoSides(t, [
+    JSON.stringify({
+      act: "BRIEF", headline: "opening", body: "my position",
+      ledger: [{ id: "i-01", state: "proposed" }],
+    }),
+    JSON.stringify({
+      act: "ACCEPT", headline: "yes", body: "agreed",
+      ledger: [{ id: "i-01", state: "agreed" }],
+    }),
+  ]);
+  const daveFp = jake.contact("dave").fingerprint;
+  await side.openingTurn();
+  const accept = fromPeer(convo.id, 1, {
+    from: daveFp, act: "ACCEPT", headline: "a", body: "b",
+    ledger: [{ id: "i-01", state: "agreed" }],
+  });
+  side.observe(accept);
+  await side.replyTo(accept);
+
+  const md = side.writeDecision();
+  assert.match(md, /## Decision\n\n- no new infrastructure/, "both said agreed, so it is decided");
+  assert.doesNotMatch(md, /agreed by one side only/);
+});

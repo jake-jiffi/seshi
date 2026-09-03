@@ -5,12 +5,65 @@
 //
 // The relay-sees-only-ciphertext shape is taken from agent-talk/retalk (MIT).
 import { WebSocketServer, WebSocket } from "ws";
+import type { IncomingMessage } from "node:http";
 
 /** Hard cap on one frame, enforced here rather than by convention (spec s4.2). */
 const MAX_FRAME_CHARS = 256 * 1024;
 
 /** Frames held for one offline recipient before the oldest starts falling off. */
 const MAX_QUEUE = 500;
+
+/**
+ * Bytes the relay will hold for offline recipients, across everyone.
+ *
+ * The per-recipient cap above never bounded anything on its own: a sender
+ * simply names a new recipient per frame. Measured before this existed, one
+ * unauthenticated socket sending 4,000 frames at a quarter of the frame cap
+ * took a relay from 86 MB to 979 MB of RSS, against a 256 MB machine. This is
+ * the number that actually holds. 32 MB is 128 frames at the cap, which is
+ * days of two people talking past each other.
+ */
+export const MAX_QUEUED_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Frames one sender may have waiting across all recipients. A real
+ * conversation has at most one turn in flight, so this is generous, and it
+ * stops one socket from owning the whole byte budget above.
+ */
+export const MAX_QUEUED_PER_SENDER = 64;
+
+/**
+ * How long a queued frame waits for its recipient. Without this a frame for
+ * a fingerprint that never comes back is held forever, and with a byte cap in
+ * place that becomes a slow leak that ends in the relay refusing everyone.
+ */
+export const QUEUE_TTL_MS = 6 * 60 * 60_000;
+
+/** Full queue sweep runs at most this often. Lazy, like the mailboxes. */
+const QUEUE_SWEEP_MS = 60_000;
+
+/** Mailbox puts one connection may attempt before it is cut off. Same
+ *  reasoning as MBOX_MAX_MISSES: a real inviter does one. */
+const MBOX_MAX_PUTS = 20;
+
+/**
+ * Refused sends one connection may accumulate before it is cut off. A refusal
+ * still costs the relay a parse of up to 256 KB, so without this a sender that
+ * has hit its budget can keep the CPU busy for as long as the link allows. A
+ * real client sees one refusal and stops; twenty is a flood.
+ */
+const MAX_REFUSALS = 20;
+
+/**
+ * Concurrent connections one client address may hold.
+ *
+ * Every other bound here is per fingerprint or per connection, and both are
+ * free to mint. An address is not. Behind Fly the address is what the proxy
+ * puts in Fly-Client-IP; anywhere else it is the socket's own peer. Nothing
+ * client-supplied is trusted for this, so X-Forwarded-For is deliberately
+ * ignored. 32 covers an office behind one NAT with room to spare.
+ */
+export const MAX_CONNS_PER_IP = 32;
 
 const FINGERPRINT = /^[0-9a-f]{32}$/;
 
@@ -63,7 +116,7 @@ const BASE64ISH = /^[A-Za-z0-9+/_=-]+$/;
 
 type Mailbox = { data: string; expiresAt: number };
 
-type QueuedFrame = { from: string; frame: string };
+type QueuedFrame = { from: string; frame: string; at: number };
 
 export type Relay = {
   port: number;
@@ -71,6 +124,13 @@ export type Relay = {
 };
 
 const asString = (v: unknown): string | null => (typeof v === "string" ? v : null);
+
+/** The address a connection counts against. See MAX_CONNS_PER_IP. */
+function clientAddress(req: IncomingMessage): string {
+  const fly = req.headers["fly-client-ip"];
+  if (typeof fly === "string" && fly !== "") return fly;
+  return req.socket.remoteAddress ?? "unknown";
+}
 
 export async function startRelay(opts: {
   port: number;
@@ -86,6 +146,37 @@ export async function startRelay(opts: {
   /** mailbox id -> the bundle waiting to be claimed exactly once */
   const mailboxes = new Map<string, Mailbox>();
   let lastSweep = 0;
+  /** Bytes across every queue, and frames waiting per sender. Both are
+   *  maintained on every push, drain, drop and expiry, so they are exact. */
+  let queuedBytes = 0;
+  const queuedBySender = new Map<string, number>();
+  let lastQueueSweep = 0;
+
+  function remember(item: QueuedFrame): void {
+    queuedBytes += item.frame.length;
+    queuedBySender.set(item.from, (queuedBySender.get(item.from) ?? 0) + 1);
+  }
+
+  function forget(item: QueuedFrame): void {
+    queuedBytes -= item.frame.length;
+    const n = queuedBySender.get(item.from) ?? 0;
+    if (n <= 1) queuedBySender.delete(item.from);
+    else queuedBySender.set(item.from, n - 1);
+  }
+
+  /** Drop frames past their TTL. Queues are appended in time order, so each
+   *  one is trimmed from the front until the first live frame. */
+  function sweepQueues(): void {
+    const t = now();
+    if (t - lastQueueSweep < QUEUE_SWEEP_MS) return;
+    lastQueueSweep = t;
+    for (const [fp, queued] of queues) {
+      while (queued.length > 0 && (queued[0] as QueuedFrame).at + QUEUE_TTL_MS <= t) {
+        forget(queued.shift() as QueuedFrame);
+      }
+      if (queued.length === 0) queues.delete(fp);
+    }
+  }
 
   /** Expiry is lazy: nothing runs on a timer, it is swept on the way past. */
   function sweepMailboxes(force = false): void {
@@ -126,16 +217,30 @@ export async function startRelay(opts: {
     while (queued.length > 0 && socket.readyState === WebSocket.OPEN) {
       const item = queued.shift();
       if (!item) break;
+      forget(item);
       deliver(socket, item.from, item.frame);
     }
     if (queued.length === 0) queues.delete(fp);
   }
 
-  function route(from: string, to: string, frame: string, reply: (m: unknown) => void): void {
+  /** True when the frame was refused rather than delivered or queued. */
+  function route(from: string, to: string, frame: string, reply: (m: unknown) => void): boolean {
     const target = live.get(to);
     if (target && target.readyState === WebSocket.OPEN) {
       deliver(target, from, frame);
-      return;
+      return false;
+    }
+    sweepQueues();
+    // Both refusals are coded, because a sender has to tell "slow down" from
+    // "the relay is full" from "the recipient is buried", and none of the
+    // three says anything about which mailboxes exist.
+    if ((queuedBySender.get(from) ?? 0) >= MAX_QUEUED_PER_SENDER) {
+      reply({ t: "error", msg: "too many frames waiting from this sender", code: "backlog" });
+      return true;
+    }
+    if (queuedBytes + frame.length > MAX_QUEUED_BYTES) {
+      reply({ t: "error", msg: "relay is holding as much as it can", code: "full" });
+      return true;
     }
     let queued = queues.get(to);
     if (!queued) {
@@ -143,16 +248,32 @@ export async function startRelay(opts: {
       queues.set(to, queued);
     }
     if (queued.length >= MAX_QUEUE) {
-      queued.shift();
+      forget(queued.shift() as QueuedFrame);
       reply({ t: "overflow", to });
     }
-    queued.push({ from, frame });
+    const item: QueuedFrame = { from, frame, at: now() };
+    queued.push(item);
+    remember(item);
     reply({ t: "queued" });
+    return false;
   }
 
-  wss.on("connection", (socket) => {
+  /** client address -> open connections from it */
+  const connsByIp = new Map<string, number>();
+
+  wss.on("connection", (socket, req: IncomingMessage) => {
+    const ip = clientAddress(req);
+    const fromIp = (connsByIp.get(ip) ?? 0) + 1;
+    if (fromIp > MAX_CONNS_PER_IP) {
+      socket.close(4029, "too many connections from this address");
+      return;
+    }
+    connsByIp.set(ip, fromIp);
+
     let fp: string | null = null;
     let misses = 0;
+    let puts = 0;
+    let refusals = 0;
 
     const reply = (m: unknown): void => {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(m));
@@ -181,6 +302,14 @@ export async function startRelay(opts: {
         return;
       }
       const m = parsed as Record<string, unknown>;
+
+      // Keepalive. Every proxy between two people has an idle timeout, and a
+      // model turn is longer than most of them. Answered before hello so a
+      // client can hold a socket open while it is still deciding who it is.
+      if (m["t"] === "ping") {
+        reply({ t: "pong" });
+        return;
+      }
 
       if (m["t"] === "hello") {
         // NOTE: hello is self-asserted. This prototype relay does not prove key
@@ -228,11 +357,20 @@ export async function startRelay(opts: {
           fail("frame exceeds the 256 KB cap");
           return;
         }
-        route(me, to, frame, reply);
+        if (route(me, to, frame, reply)) {
+          refusals += 1;
+          if (refusals >= MAX_REFUSALS) socket.close(4029, "rate limited");
+        }
         return;
       }
 
       if (m["t"] === "mbox_put") {
+        if (puts >= MBOX_MAX_PUTS) {
+          fail("too many mailboxes from this connection, slow down");
+          socket.close(4029, "rate limited");
+          return;
+        }
+        puts += 1;
         const id = asString(m["id"]);
         if (id === null || !MBOX_ID.test(id)) {
           fail("bad mailbox id");
@@ -301,6 +439,9 @@ export async function startRelay(opts: {
 
     socket.on("close", () => {
       if (fp !== null && live.get(fp) === socket) live.delete(fp);
+      const left = (connsByIp.get(ip) ?? 1) - 1;
+      if (left <= 0) connsByIp.delete(ip);
+      else connsByIp.set(ip, left);
     });
 
     // Swallowed rather than logged: a transport error can carry frame bytes.

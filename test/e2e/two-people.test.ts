@@ -399,3 +399,36 @@ test("arming for one contact does not let a DIFFERENT paired contact open", asyn
   await assert.rejects(() => dave.waitForTurn({ timeoutMs: 1200 }), /timed out/);
   assert.equal(dave.storage.getConvo(convo.id), null);
 });
+
+test("a stranger flooding frames cannot grow the reject list without bound", async (t) => {
+  const { url, jake, dave } = await twoPeople(t);
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
+
+  // Mallory knows Dave's fingerprint from an invite and is not paired with him.
+  // Every frame she throws is one reject. Before the cap this list grew for
+  // as long as she cared to keep sending.
+  const mallory = await SeshiNode.open({ home: tmpHome("mallory"), relayUrl: url, name: "mallory" });
+  t.after(() => mallory.close());
+  mallory.pairWithBundle(dave.inviteBundle());
+  const mConvo = mallory.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
+  for (let i = 0; i < 300; i++) {
+    await mallory.send(mConvo.id, { seq: 0, prev: null, act: "PROPOSE", headline: "spam", body: `frame ${i}` });
+  }
+
+  // Wait for the flood to finish landing: the count stops moving.
+  let last = -1;
+  let quietFor = 0;
+  const deadline = Date.now() + 8000;
+  while (quietFor < 300 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+    if (dave.rejects.length === last) quietFor += 50;
+    else {
+      last = dave.rejects.length;
+      quietFor = 0;
+    }
+  }
+  assert.ok(dave.rejects.length >= 200, `expected the flood to land, saw ${dave.rejects.length} rejects`);
+  assert.ok(dave.rejects.length <= 256, `rejects grew to ${dave.rejects.length}, past the cap`);
+  assert.match(dave.rejects[dave.rejects.length - 1]!.reason, /unknown contact/);
+});

@@ -53,6 +53,8 @@ function runHook(opts: {
   dropEnv?: string[];
   prefix?: string;
   extraEnv?: Record<string, string>;
+  /** What the stub CLI prints for `seshi help`. Empty means no watch command. */
+  stubHelp?: string;
 }): { stdout: string } {
   const sandbox = mkdtempSync(join(tmpdir(), opts.prefix ?? "seshi-hook-"));
   const bin = join(sandbox, "bin");
@@ -63,7 +65,12 @@ function runHook(opts: {
   mkdirSync(seshiHome);
   if (opts.seshiOnPath) {
     const stub = join(bin, "seshi");
-    writeFileSync(stub, "#!/bin/sh\nexit 0\n");
+    // The hook asks the CLI what it offers before it says anything, so the
+    // stub has to be able to answer `help`. The text lives in a file so the
+    // test can hand over any shape without fighting shell quoting.
+    const helpFile = join(bin, "help.txt");
+    writeFileSync(helpFile, opts.stubHelp ?? "");
+    writeFileSync(stub, `#!/bin/sh\nif [ "$1" = help ]; then cat "${helpFile}"; fi\nexit 0\n`);
     chmodSync(stub, 0o755);
   }
   if (opts.withIdentity) writeFileSync(join(seshiHome, "identity.json"), "{}");
@@ -134,8 +141,18 @@ test("the hook is an executable script that credits agmsg", () => {
   assert.match(header, /fujibee/i, "the upstream project must be identified");
 });
 
-test("the hook directs the model to Monitor 'seshi watch' persistently", () => {
+/** A CLI that has grown the two commands the hook's directive names. */
+const WITH_WATCH = "  seshi watch     stream this machine's activity\n  seshi say <convo> \"...\"\n";
+
+test("the hook stays silent while the CLI has no watch command", () => {
+  // This is the CLI as it ships today. Speaking here made every session start
+  // launch a persistent Monitor of a command that printed "unknown command".
   const { stdout } = runHook({ seshiOnPath: true, withIdentity: true });
+  assert.equal(stdout.trim(), "", "must not direct the model at a command that does not exist");
+});
+
+test("the hook directs the model to Monitor 'seshi watch' persistently, once it exists", () => {
+  const { stdout } = runHook({ seshiOnPath: true, withIdentity: true, stubHelp: WITH_WATCH });
   assert.match(stdout, /Monitor/, "must name the Monitor tool");
   assert.match(stdout, /persistent:\s*true/, "must ask for a persistent Monitor task");
   assert.match(stdout, /\bwatch\b/, "must point Monitor at seshi watch");
@@ -143,7 +160,12 @@ test("the hook directs the model to Monitor 'seshi watch' persistently", () => {
 });
 
 test("the hook shell-quotes an awkward install path", () => {
-  const { stdout } = runHook({ seshiOnPath: true, withIdentity: true, prefix: "seshi o'brien dir-" });
+  const { stdout } = runHook({
+    seshiOnPath: true,
+    withIdentity: true,
+    prefix: "seshi o'brien dir-",
+    stubHelp: WITH_WATCH,
+  });
   const m = /command: (.+)/.exec(stdout);
   assert.ok(m, "a command line must be printed");
   // Re-parse the printed command with a real shell: it must survive round-tripping.

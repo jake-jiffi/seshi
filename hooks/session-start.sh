@@ -32,6 +32,15 @@ SESHI_HOME="${SESHI_HOME:-${HOME:-}/.seshi}"
 # is built around.
 SESHI_CMD=$(command -v seshi 2>/dev/null) || exit 0
 
+# Only speak once the commands this directive names actually exist. Until the
+# CLI dispatches `watch` and `say`, pointing a session at them starts a
+# persistent Monitor task that prints "unknown command" and exits, on every
+# session start, on every machine, forever. Checked against the CLI's own help
+# rather than a version number, so it can never be a guess.
+HELP=$("$SESHI_CMD" help 2>/dev/null) || exit 0
+printf '%s' "$HELP" | grep -q 'seshi watch' || exit 0
+printf '%s' "$HELP" | grep -q 'seshi say' || exit 0
+
 # %q so a path with a space or an apostrophe (/Users/o'brien/...) survives being
 # pasted into Monitor and re-parsed by a shell.
 WATCH_COMMAND=$(printf '%q watch' "$SESHI_CMD")

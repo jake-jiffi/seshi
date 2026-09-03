@@ -18,7 +18,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ACTS, LEDGER_STATES, type Act, type Envelope } from "../../core/src/envelope.ts";
 import { wrapPeerText } from "../../core/src/escape.ts";
-import { Ledger } from "../../core/src/ledger.ts";
+import { Ledger, type IssueRecord } from "../../core/src/ledger.ts";
 import { detect, type Detection } from "../../core/src/detectors.ts";
 import { PeerAgent } from "./peer-agent.ts";
 import { tierSettings, type Tier } from "./tiers.ts";
@@ -349,9 +349,47 @@ export class Conversation {
     return envelope;
   }
 
+  /**
+   * Issues BOTH parties' most recent ledger views call agreed.
+   *
+   * The local ledger accepts a legal transition from either side, so a peer
+   * declaring `agreed` on its own moves our ledger there, and the artefact used
+   * to print that under "Decision" as though we had signed it. One side's
+   * claim is not a decision. The footer already says neither copy is
+   * authoritative over the other; this is that sentence applied to the one
+   * section people actually read.
+   */
+  #agreedByBoth(): Set<string> {
+    const latest = new Map<string, Map<string, string>>();
+    for (const e of this.#history) {
+      for (const entry of e.ledger ?? []) {
+        let view = latest.get(e.from);
+        if (view === undefined) {
+          view = new Map();
+          latest.set(e.from, view);
+        }
+        view.set(entry.id, entry.state);
+      }
+    }
+    const parties = [this.#me, this.#peer.fingerprint];
+    const out = new Set<string>();
+    for (const i of this.#ledger.all()) {
+      if (i.state !== "agreed") continue;
+      if (parties.every((p) => latest.get(p)?.get(i.id) === "agreed")) out.add(i.id);
+    }
+    return out;
+  }
+
   /** The artefact. Written on abort too, where it degrades to an open-issues list. */
   writeDecision(detections: Detection[] = []): string {
     const l = this.#ledger.all();
+    const both = this.#agreedByBoth();
+    const decided = l.filter((i) => both.has(i.id));
+    // Agreed in the ledger on one side's say-so is still open as far as the
+    // artefact is concerned, and it says which side.
+    const unsettled = l.filter((i) => !["parked", "escalated"].includes(i.state) && !both.has(i.id));
+    const label = (i: IssueRecord): string =>
+      i.state === "agreed" ? "agreed by one side only" : i.state;
     const md = [
       `# ${this.#convo.brief.objective}`,
       ``,
@@ -360,18 +398,15 @@ export class Conversation {
       ``,
       `## Decision`,
       ``,
-      l.filter((i) => i.state === "agreed").length === 0
+      decided.length === 0
         ? `_No issue reached agreement. This is an open-issues list, not a decision._`
-        : l.filter((i) => i.state === "agreed").map((i) => `- ${i.text}`).join("\n"),
+        : decided.map((i) => `- ${i.text}`).join("\n"),
       ``,
       `## Still open`,
       ``,
-      l.filter((i) => !["agreed", "parked", "escalated"].includes(i.state)).length === 0
+      unsettled.length === 0
         ? `_Nothing._`
-        : l
-            .filter((i) => !["agreed", "parked", "escalated"].includes(i.state))
-            .map((i) => `- **${i.id}** [${i.state}] ${i.text}`)
-            .join("\n"),
+        : unsettled.map((i) => `- **${i.id}** [${label(i)}] ${i.text}`).join("\n"),
       ``,
       `## Parked and escalated`,
       ``,

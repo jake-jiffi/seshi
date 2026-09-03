@@ -52,6 +52,13 @@ import { MailboxOccupiedError, mailboxPut, mailboxTake } from "./mailbox.ts";
 /** Same shape storage enforces, because a fingerprint becomes a directory name. */
 const FINGERPRINT = /^[0-9a-f]{32}$/;
 
+/**
+ * Rejected frames kept for the human to read. Anyone who has seen an invite
+ * link knows a fingerprint, can hello as anyone and throw garbage at it, and
+ * every piece of garbage is one reject. The newest are the ones worth reading.
+ */
+const MAX_REJECTS = 256;
+
 const hex = (b: Uint8Array): string => Buffer.from(b).toString("hex");
 const unhex = (s: string): Uint8Array => Uint8Array.from(Buffer.from(s, "hex"));
 
@@ -107,10 +114,15 @@ export type PendingInvite = {
 const POLL_MS = 2_000;
 const WAIT_MS = 10 * 60_000;
 
+// Deliberately NOT unref'd. This timer is the only handle holding the process
+// open between mailbox polls: the relay socket opened by `open()` is closed by
+// an idle tunnel after a couple of minutes, and the client's reconnect timer IS
+// unref'd. Unref this one too and node exits 0, silently, mid-pairing, long
+// before WAIT_MS is up. The visible symptom is `seshi start` printing the invite
+// and then just ending while the other person is still installing.
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    t.unref?.();
+    setTimeout(resolve, ms);
   });
 
 /** A mailbox carries base64. The bundle is already a string, so this is a
@@ -146,9 +158,14 @@ export class SeshiNode {
     this.#client = new RelayClient({
       url: opts.relayUrl,
       identity,
+      // Without this the reconnect path is dead code: `#scheduleReconnect`
+      // returns early on a 0 interval, so the first idle drop is permanent. A
+      // quick tunnel kills an idle socket at ~126s, which is shorter than one
+      // agent turn, and the relay only drains a queued frame on the next hello.
+      reconnectMs: 2_000,
       resolveContact: (fp) => this.storage.getContact(fp),
       onEnvelope: (envelope, contact) => this.#deliver(envelope, contact),
-      onReject: (from, reason) => this.#rejects.push({ from, reason }),
+      onReject: (from, reason) => this.#noteReject({ from, reason }),
     });
   }
 
@@ -171,6 +188,13 @@ export class SeshiNode {
 
   get rejects(): ReadonlyArray<{ from: string; reason: string }> {
     return this.#rejects;
+  }
+
+  #noteReject(entry: { from: string; reason: string }): void {
+    this.#rejects.push(entry);
+    if (this.#rejects.length > MAX_REJECTS) {
+      this.#rejects.splice(0, this.#rejects.length - MAX_REJECTS);
+    }
   }
 
   /**
@@ -199,18 +223,31 @@ export class SeshiNode {
   ): Promise<Pairing> {
     const pollMs = opts.pollMs ?? POLL_MS;
     const deadline = Date.now() + (opts.timeoutMs ?? WAIT_MS);
+    // One slow or dropped poll used to end the whole wait, so a single blip on
+    // a tunnel read as "your friend never turned up". Remember the last failure
+    // instead, and only speak up about it if we never get a good answer.
+    let lastError: Error | null = null;
     for (;;) {
-      const data = await mailboxTake(this.#relayUrl, box.answer);
-      // parseInvite runs inside pairWithBundle. A mailbox is untrusted
-      // transport exactly like the relay, so what comes out of it gets the
-      // same fingerprint check a pasted blob gets.
-      if (data !== null) return this.pairWithBundle(fromMailbox(data), name);
+      try {
+        const data = await mailboxTake(this.#relayUrl, box.answer);
+        // parseInvite runs inside pairWithBundle. A mailbox is untrusted
+        // transport exactly like the relay, so what comes out of it gets the
+        // same fingerprint check a pasted blob gets.
+        if (data !== null) return this.pairWithBundle(fromMailbox(data), name);
+        lastError = null;
+      } catch (err) {
+        lastError = err as Error;
+      }
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         // Spend our own offer so a code that leaked into Slack scrollback is
         // dead when we stop waiting, rather than live for the rest of its TTL.
         await mailboxTake(this.#relayUrl, box.offer).catch(() => {});
-        throw new Error("nobody joined with that code. Run invite again for a fresh one.");
+        throw new Error(
+          lastError === null
+            ? "nobody joined with that code. Run invite again for a fresh one."
+            : `the relay stopped answering while waiting: ${lastError.message}`,
+        );
       }
       await sleep(Math.min(pollMs, remaining));
     }
@@ -443,7 +480,7 @@ export class SeshiNode {
     if (convo === null) {
       const opened = this.#tryOpen(envelope, contact);
       if (opened === null) {
-        this.#rejects.push({
+        this.#noteReject({
           from: contact.fingerprint,
           reason: `unknown conversation ${envelope.convo}: we never started or joined it`,
         });
@@ -452,7 +489,7 @@ export class SeshiNode {
       convo = opened;
     }
     if (convo.peer !== contact.fingerprint) {
-      this.#rejects.push({
+      this.#noteReject({
         from: contact.fingerprint,
         reason: `conversation ${envelope.convo} is with ${convo.peer}, not with them`,
       });
@@ -464,7 +501,7 @@ export class SeshiNode {
     if (verdict === "fork") {
       // A replayed or rewritten turn. Both look identical from here and both
       // are refused: an honest peer never sends either.
-      this.#rejects.push({
+      this.#noteReject({
         from: contact.fingerprint,
         reason: `replayed or rewritten turn at seq ${envelope.seq}: chain says fork`,
       });
@@ -473,7 +510,7 @@ export class SeshiNode {
     if (verdict === "gap") {
       // A turn went missing. Record it and carry on: the transcript is now
       // known-incomplete, which is better than pretending it is not.
-      this.#rejects.push({
+      this.#noteReject({
         from: contact.fingerprint,
         reason: `gap before seq ${envelope.seq}: a turn never arrived`,
       });

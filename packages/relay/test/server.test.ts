@@ -190,21 +190,30 @@ test("stamps from off the connection and ignores a self-asserted from", async ()
 
 test("caps the per-recipient queue at 500 frames, dropping the oldest", async () => {
   await withRelay(async (port) => {
-    const a = await Client.connect(port);
-    a.hello(FP_A);
-
-    for (let i = 0; i < 501; i++) a.send({ t: "send", to: FP_B, frame: b64(String(i)) });
-
+    // One sender is capped at 64 waiting frames, so burying a recipient takes
+    // several of them. Nine senders, 56 frames each: 504 for one recipient.
+    const SENDERS = 9;
+    const EACH = 56;
     let queued = 0;
     let overflow = 0;
-    for (let i = 0; i < 502; i++) {
-      const m = await a.next(5000);
-      if (m.t === "queued") queued++;
-      else if (m.t === "overflow") overflow++;
-      else assert.fail(`unexpected reply ${JSON.stringify(m)}`);
+    for (let s = 0; s < SENDERS; s++) {
+      const a = await Client.connect(port);
+      a.hello(s.toString(16).padStart(32, "a"));
+      for (let i = 0; i < EACH; i++) a.send({ t: "send", to: FP_B, frame: b64(`${s}:${i}`) });
+      // Replies are read before the next sender starts, so queue order is fixed.
+      const expected = EACH + Math.max(0, s * EACH + EACH - 500);
+      for (let i = 0; i < EACH; i++) {
+        const m = await a.next(5000);
+        if (m.t === "queued") queued++;
+        else if (m.t === "overflow") {
+          overflow++;
+          i--; // an overflow precedes the queued reply for the same frame
+        } else assert.fail(`unexpected reply ${JSON.stringify(m)}`);
+      }
+      void expected;
     }
-    assert.equal(queued, 501);
-    assert.equal(overflow, 1);
+    assert.equal(queued, SENDERS * EACH);
+    assert.equal(overflow, SENDERS * EACH - 500);
 
     const b = await Client.connect(port);
     b.hello(FP_B);
@@ -215,8 +224,8 @@ test("caps the per-recipient queue at 500 frames, dropping the oldest", async ()
       assert.equal(m.t, "deliver");
       got.push(Buffer.from(String(m.frame), "base64").toString("utf8"));
     }
-    assert.equal(got[0], "1", "the oldest frame should have been dropped");
-    assert.equal(got[499], "500");
+    assert.equal(got[0], "0:4", "the four oldest frames should have been dropped");
+    assert.equal(got[499], "8:55");
     await b.expectSilence(150);
   });
 });
@@ -369,8 +378,20 @@ test("expired mailboxes are swept rather than accumulating", async () => {
     const c = await Client.connect(port);
     const id = (n: number) => n.toString(16).padStart(64, "0");
 
-    for (let i = 0; i < 50; i++) c.send({ t: "mbox_put", id: id(i), data: b64("x") });
-    for (let i = 0; i < 50; i++) assert.deepEqual(await c.next(), { t: "mbox_ok" });
+    // Fifty puts from one connection would trip the put budget, which exists
+    // so one stranger cannot fill the relay's mailboxes. So this reconnects
+    // every 15, the way fifty separate inviters would arrive.
+    // `c` stays untouched for the checker below.
+    let putter = await Client.connect(port);
+    for (let i = 0; i < 50; i++) {
+      if (i > 0 && i % 15 === 0) {
+        putter.ws.close();
+        putter = await Client.connect(port);
+      }
+      putter.send({ t: "mbox_put", id: id(i), data: b64("x") });
+      assert.deepEqual(await putter.next(), { t: "mbox_ok" });
+    }
+    putter.ws.close();
 
     // Nobody ever claims them. Once the TTL passes they are gone without a
     // take, which is what stops an abandoned invite living in memory forever.
@@ -395,14 +416,21 @@ test("expired mailboxes are swept rather than accumulating", async () => {
 
 test("the relay refuses to hold more than 10000 mailboxes", async () => {
   await withRelay(async (port) => {
-    const c = await Client.connect(port);
     const id = (n: number) => n.toString(16).padStart(64, "0");
 
-    for (let i = 0; i < 10_000; i++) c.send({ t: "mbox_put", id: id(i), data: b64("x") });
-    for (let i = 0; i < 10_000; i++) {
-      assert.deepEqual(await c.next(20_000), { t: "mbox_ok" }, `put ${i} was refused`);
+    // One connection may make 20 puts, so filling the relay takes 500 of them,
+    // which is the shape a real flood would have to take.
+    const PER_CONN = 20;
+    for (let base = 0; base < 10_000; base += PER_CONN) {
+      const p = await Client.connect(port);
+      for (let i = 0; i < PER_CONN; i++) p.send({ t: "mbox_put", id: id(base + i), data: b64("x") });
+      for (let i = 0; i < PER_CONN; i++) {
+        assert.deepEqual(await p.next(20_000), { t: "mbox_ok" }, `put ${base + i} was refused`);
+      }
+      p.ws.close();
     }
 
+    const c = await Client.connect(port);
     // Past the cap a put is refused rather than remembered, so a stranger
     // cannot grow the relay's heap one mailbox at a time.
     c.send({ t: "mbox_put", id: id(10_000), data: b64("x") });
@@ -456,5 +484,188 @@ test("a mailbox never reaches the envelope path", async () => {
     // A mailbox is only ever readable by someone who names its id. It is not
     // broadcast, not queued, and not delivered to whoever happens to be online.
     await a.expectSilence(150);
+  });
+});
+
+// ---- Bounds on what one socket, and the relay as a whole, will hold ----------
+//
+// Measured before these existed: one unauthenticated socket, 4,000 frames at a
+// quarter of the cap, took a local relay from 86 MB to 979 MB. The public
+// machine has 256 MB. The per-recipient cap of 500 never engaged, because the
+// attacker simply names a new recipient each time.
+
+import { MAX_CONNS_PER_IP, MAX_QUEUED_BYTES, MAX_QUEUED_PER_SENDER, QUEUE_TTL_MS } from "../src/server.ts";
+
+const fpN = (n: number) => n.toString(16).padStart(32, "0");
+
+test("one sender cannot park more than MAX_QUEUED_PER_SENDER frames, however many recipients it names", async () => {
+  await withRelay(async (port) => {
+    const a = await Client.connect(port);
+    a.hello(FP_A);
+    // One frame each to MAX+1 distinct offline recipients.
+    for (let i = 0; i < MAX_QUEUED_PER_SENDER + 1; i++) {
+      a.send({ t: "send", to: fpN(i + 1), frame: b64(`frame ${i}`) });
+    }
+    let queued = 0;
+    let backlog = 0;
+    for (let i = 0; i < MAX_QUEUED_PER_SENDER + 1; i++) {
+      const m = await a.next(5000);
+      if (m.t === "queued") queued++;
+      else if (m.t === "error" && m.code === "backlog") backlog++;
+      else assert.fail(`unexpected reply ${JSON.stringify(m)}`);
+    }
+    assert.equal(queued, MAX_QUEUED_PER_SENDER);
+    assert.equal(backlog, 1, "the frame past the sender's budget must be refused, not parked");
+
+    // Draining one recipient hands that slot back to the sender.
+    const r = await Client.connect(port);
+    r.hello(fpN(1));
+    assert.equal((await r.next()).t, "deliver");
+    a.send({ t: "send", to: fpN(999), frame: b64("after a drain") });
+    assert.equal((await a.next()).t, "queued");
+  });
+});
+
+test("the relay refuses to hold more than MAX_QUEUED_BYTES across every sender", async () => {
+  await withRelay(async (port) => {
+    // Enough senders that the per-sender cap alone cannot bound the total.
+    const frame = "A".repeat(200 * 1024);
+    const senders = Math.ceil(MAX_QUEUED_BYTES / (frame.length * MAX_QUEUED_PER_SENDER)) + 1;
+    let accepted = 0;
+    let full = 0;
+    for (let s = 0; s < senders; s++) {
+      const c = await Client.connect(port);
+      c.hello(fpN(0x1000 + s));
+      let closed = false;
+      c.ws.addEventListener("close", () => {
+        closed = true;
+      });
+      for (let i = 0; i < MAX_QUEUED_PER_SENDER; i++) {
+        c.send({ t: "send", to: fpN(0x2000 + s * MAX_QUEUED_PER_SENDER + i), frame });
+      }
+      for (let i = 0; i < MAX_QUEUED_PER_SENDER && !closed; i++) {
+        const m = await c.next(10_000).catch(() => null);
+        if (m === null) break; // cut off for repeated refusals, which is correct
+        if (m.t === "queued") accepted++;
+        else if (m.t === "error" && m.code === "full") full++;
+        else assert.fail(`unexpected reply ${JSON.stringify(m)}`);
+      }
+      c.ws.close();
+    }
+    assert.ok(accepted * frame.length <= MAX_QUEUED_BYTES, `held ${accepted * frame.length} bytes, over the cap`);
+    assert.ok(full > 0, "some frames must have been refused as full");
+  });
+});
+
+test("a frame nobody collects is dropped after QUEUE_TTL_MS rather than held forever", async () => {
+  let clock = 1_000_000;
+  const relay = await startRelay({ port: 0, now: () => clock });
+  try {
+    const a = await Client.connect(relay.port);
+    a.hello(FP_A);
+    a.send({ t: "send", to: FP_B, frame: b64("stale") });
+    assert.equal((await a.next()).t, "queued");
+
+    clock += QUEUE_TTL_MS + 1;
+    // The sweep is lazy, so any queueing activity triggers it.
+    a.send({ t: "send", to: FP_C, frame: b64("fresh") });
+    assert.equal((await a.next()).t, "queued");
+
+    const b = await Client.connect(relay.port);
+    b.hello(FP_B);
+    await b.expectSilence(150);
+  } finally {
+    await relay.close();
+  }
+});
+
+test("one connection cannot fill the relay's mailboxes on its own", async () => {
+  await withRelay(async (port) => {
+    const c = await Client.connect(port);
+    const id = (n: number) => n.toString(16).padStart(64, "0");
+    let ok = 0;
+    let refused = false;
+    for (let i = 0; i < 40; i++) {
+      c.send({ t: "mbox_put", id: id(i + 1), data: b64("bundle") });
+      const m = await c.next(5000).catch(() => null);
+      if (m === null) break;
+      if (m.t === "mbox_ok") ok++;
+      else {
+        refused = true;
+        break;
+      }
+    }
+    assert.ok(refused, "the relay must cut a connection off before it can fill every mailbox");
+    assert.ok(ok < 40 && ok > 0, `expected a bounded number of puts, got ${ok}`);
+  });
+});
+
+test("ping is answered with pong, before and after hello", async () => {
+  await withRelay(async (port) => {
+    const c = await Client.connect(port);
+    c.send({ t: "ping" });
+    assert.equal((await c.next()).t, "pong");
+    c.hello(FP_A);
+    c.send({ t: "ping" });
+    assert.equal((await c.next()).t, "pong");
+  });
+});
+
+test("a sender that keeps being refused is cut off rather than kept busy", async () => {
+  await withRelay(async (port) => {
+    const a = await Client.connect(port);
+    a.hello(FP_A);
+    // Fill the sender's budget, then keep pushing.
+    for (let i = 0; i < MAX_QUEUED_PER_SENDER + 40; i++) {
+      a.send({ t: "send", to: fpN(0x5000 + i), frame: b64("x") });
+    }
+    let refused = 0;
+    let closed = false;
+    a.ws.addEventListener("close", () => {
+      closed = true;
+    });
+    for (let i = 0; i < MAX_QUEUED_PER_SENDER + 40; i++) {
+      const m = await a.next(5000).catch(() => null);
+      if (m === null) break;
+      if (m.t === "error") refused++;
+    }
+    await sleep(100);
+    assert.ok(closed, "the relay must close a socket that keeps sending past its budget");
+    assert.ok(refused >= 20 && refused < 40, `expected the cut-off near 20 refusals, saw ${refused}`);
+  });
+});
+
+test("one client address may hold a bounded number of connections", async () => {
+  const { WebSocket: WsClient } = await import("ws");
+  await withRelay(async (port) => {
+    const open = async (ip: string) => {
+      const ws = new WsClient(`ws://127.0.0.1:${port}`, { headers: { "fly-client-ip": ip } });
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", () => resolve());
+        ws.once("error", reject);
+      });
+      return ws;
+    };
+    const held: Array<Awaited<ReturnType<typeof open>>> = [];
+    for (let i = 0; i < MAX_CONNS_PER_IP; i++) held.push(await open("203.0.113.9"));
+
+    // One over: closed by the relay with the rate-limit code.
+    const extra = await open("203.0.113.9");
+    const code = await new Promise<number>((r) => extra.once("close", (c) => r(c)));
+    assert.equal(code, 4029);
+
+    // A different address is unaffected.
+    const other = await open("198.51.100.4");
+    other.close();
+
+    // Closing one frees a slot.
+    held[0]!.close();
+    await new Promise((r) => held[0]!.once("close", r));
+    await sleep(50);
+    const again = await open("203.0.113.9");
+    await sleep(100);
+    assert.equal(again.readyState, WsClient.OPEN, "a freed slot must be reusable");
+    again.close();
+    for (const ws of held) ws.close();
   });
 });
