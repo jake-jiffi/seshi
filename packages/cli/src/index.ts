@@ -298,7 +298,12 @@ async function start(
  * next prompt, and over the wire as a HUMAN envelope that the peer's daemon
  * frames as the other person speaking.
  */
-async function attachControl(node: SeshiNode, side: Conversation, convoId: string): Promise<Daemon> {
+type Control = Pick<Daemon, "broadcast" | "stop">;
+
+/** What the conversation runs with when the control socket could not start. */
+const NO_CONTROL: Control = { broadcast: () => {}, stop: () => Promise.resolve() };
+
+async function attachControl(node: SeshiNode, side: Conversation, convoId: string): Promise<Control> {
   try {
     return await startDaemon({
       home: seshiHome(),
@@ -325,7 +330,14 @@ async function attachControl(node: SeshiNode, side: Conversation, convoId: strin
         "another conversation is running on this machine. Finish it, then start this one.",
       );
     }
-    throw err;
+    // The conversation does not need the control socket; `say` and `watch`
+    // do. Losing those is worth a warning. Losing the conversation after the
+    // other person has already paired is not.
+    process.stderr.write(
+      `  ! could not open the control socket (${(err as Error).message}).\n` +
+        `    The conversation will run, but seshi say and seshi watch will not reach it.\n`,
+    );
+    return NO_CONTROL;
   }
 }
 
@@ -402,7 +414,7 @@ async function join(link: string, objective: string): Promise<number> {
 async function runLoop(
   node: SeshiNode,
   side: Conversation,
-  daemon: Daemon,
+  daemon: Control,
   peer: { name: string; fingerprint: string },
   convoId: string,
   turns: number,

@@ -43,12 +43,15 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { randomBytes } from "node:crypto";
-import { homedir } from "node:os";
+import { createHash, randomBytes } from "node:crypto";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Identity } from "../../core/src/identity.ts";
 import { fingerprint, parseIdentity, serializeIdentity } from "../../core/src/identity.ts";
 import type { Tier } from "./tiers.ts";
+
+/** Longest socket path that binds on every platform seshi runs on, with room for the NUL. */
+const SOCKET_PATH_MAX = 100;
 
 /** Owner-only, for directories and for every file holding a secret. */
 const DIR_MODE = 0o700;
@@ -242,8 +245,22 @@ export class Storage {
 
   // --- control socket ---------------------------------------------------
 
+  /**
+   * Where the control socket lives.
+   *
+   * A Unix socket path is capped at 104 bytes on macOS and 108 on Linux, and
+   * `listen` fails with EINVAL past that. A home under a deep directory (a
+   * scratch path, a long username, SESHI_HOME inside a project) hit it in the
+   * first live run and killed the joining side right after pairing. So a home
+   * whose socket path would not fit gets a short one in the temp directory,
+   * derived from the home so every process computes the same path. The
+   * token in control.key is still the credential; the path was never one.
+   */
   controlSocketPath(): string {
-    return join(this.home, "control.sock");
+    const inHome = join(this.home, "control.sock");
+    if (Buffer.byteLength(inHome, "utf8") <= SOCKET_PATH_MAX) return inHome;
+    const tag = createHash("sha256").update(this.home, "utf8").digest("hex").slice(0, 16);
+    return join(tmpdir(), `seshi-${tag}.sock`);
   }
 
   /**
