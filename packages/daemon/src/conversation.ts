@@ -376,7 +376,25 @@ export class Conversation {
 
   async #turn(basePrompt: string): Promise<Envelope> {
     const raw = await this.#agent.send(this.#withHumanWords(basePrompt));
-    const parsed = parseEnvelopeReply(raw);
+    let parsed = parseEnvelopeReply(raw);
+
+    // The ledger is what makes a conversation converge instead of drift, and
+    // agents argue well in prose and forget it. Seven of eight clauses were
+    // agreed in one live run and the artefact said no decision, because the
+    // ledger never moved. So a reply that leaves it out while issues are
+    // open gets one reminder, same act and words, before it goes on the wire.
+    if (parsed.ledger === undefined && parsed.act !== "NOT_UNDERSTOOD" && this.#ledger.openCount() > 0) {
+      const issues = this.#ledger.all().map((i) => `  ${i.id} [${i.state}] ${i.text}`).join("\n");
+      const again = await this.#agent.send(
+        `Your reply left out the 'ledger' field. Send the SAME envelope again, same act, same ` +
+          `headline, same body, with 'ledger' carrying the current state of every issue below. ` +
+          `Valid states: open, claimed, proposed, agreed, parked, escalated.\n${issues}`,
+      );
+      const retried = parseEnvelopeReply(again);
+      // Only take the retry if it actually answered; a worse second reply is
+      // not an improvement over a ledger-less first one.
+      if (retried.ledger !== undefined && retried.act !== "NOT_UNDERSTOOD") parsed = retried;
+    }
     this.#seq += 1;
     const envelope: Envelope = {
       v: 1,

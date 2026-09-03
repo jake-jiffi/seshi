@@ -58,7 +58,7 @@ process.stdin.on("data", (chunk) => {
   while ((nl = buf.indexOf("\\n")) >= 0) {
     fs.appendFileSync(${JSON.stringify(promptLog)}, buf.slice(0, nl) + "\\n");
     buf = buf.slice(nl + 1);
-    if (!init) { init = true; process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "fake", apiKeySource: "none", claude_code_version: "fake" }) + "\\n"); }
+    if (!init) { init = true; process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "fake", apiKeySource: "none", claude_code_version: "2.1.240" }) + "\\n"); }
     const replies = JSON.parse(fs.readFileSync(${JSON.stringify(queue)}, "utf8"));
     const text = turn === 0 ? "READY" : (replies[turn - 1] ?? replies[replies.length - 1]);
     turn += 1;
@@ -106,8 +106,13 @@ async function twoSides(t: { after: (fn: () => void | Promise<void>) => void }, 
   return { jake, dave, convo, side, fromDave };
 }
 
+// A well-behaved reply carries the ledger, so the reminder in #turn stays out
+// of these tests unless a test leaves it out on purpose.
 const reply = (act: string, extra: Record<string, unknown> = {}): string =>
-  JSON.stringify({ act, headline: `${act} headline`, body: `${act} body`, ...extra });
+  JSON.stringify({
+    act, headline: `${act} headline`, body: `${act} body`,
+    ledger: [{ id: "i-01", state: "open" }], ...extra,
+  });
 
 test("what our human says live reaches the agent's next prompt, above everything else, once", async (t) => {
   const { side, fromDave } = await twoSides(t, [reply("BRIEF"), reply("COUNTER"), reply("COUNTER")]);
@@ -161,6 +166,44 @@ test("a human cutting in does not hide the agent folding", async (t) => {
   const degenerate = side.detections().filter((d) => d.kind === "degenerate");
   assert.ok(degenerate.some((d) => /accepted or conceded on 100%/.test(d.because)),
     `expected the fold at 100%, got ${JSON.stringify(degenerate.map((d) => d.because))}`);
+});
+
+test("a reply that leaves the ledger out gets one reminder, and the reminded reply is what ships", async (t) => {
+  const bare = JSON.stringify({ act: "COUNTER", headline: "no", body: "I disagree" });
+  const withLedger = JSON.stringify({
+    act: "COUNTER", headline: "no", body: "I disagree", ledger: [{ id: "i-01", state: "open" }],
+  });
+  const { side, fromDave } = await twoSides(t, [reply("BRIEF", { ledger: [{ id: "i-01", state: "open" }] }), bare, withLedger]);
+  await side.openingTurn();
+  const before = prompts().length;
+  const p = fromDave(1, { act: "PROPOSE" });
+  side.observe(p);
+  const sent = await side.replyTo(p);
+  assert.equal(prompts().length, before + 2, "one reply prompt plus exactly one reminder");
+  assert.match(prompts().at(-1)!, /^Your reply left out the 'ledger' field/);
+  assert.match(prompts().at(-1)!, /i-01 \[open\] must run without Blender/);
+  assert.deepEqual(sent.ledger, [{ id: "i-01", state: "open" }], "the reminded reply is the one that ships");
+});
+
+test("a reply that carries the ledger is not reminded, and neither is NOT_UNDERSTOOD", async (t) => {
+  const { side, fromDave } = await twoSides(t, [
+    reply("BRIEF", { ledger: [{ id: "i-01", state: "open" }] }),
+    reply("COUNTER", { ledger: [{ id: "i-01", state: "proposed" }] }),
+    "this is not json at all",
+  ]);
+  await side.openingTurn();
+  let before = prompts().length;
+  const p1 = fromDave(1, { act: "PROPOSE" });
+  side.observe(p1);
+  await side.replyTo(p1);
+  assert.equal(prompts().length, before + 1, "a ledgered reply costs one prompt");
+
+  before = prompts().length;
+  const p2 = fromDave(2, { act: "PROPOSE", headline: "again" });
+  side.observe(p2);
+  const sent = await side.replyTo(p2);
+  assert.equal(sent.act, "NOT_UNDERSTOOD");
+  assert.equal(prompts().length, before + 1, "a reply that did not parse is not nagged for a ledger");
 });
 
 test("`say` with no id reaches the running conversation over the control socket", async (t) => {
