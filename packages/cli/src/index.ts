@@ -95,7 +95,7 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
   if (cmd === "--version" || cmd === "-v") {
-    out("seshi 0.3.1\n");
+    out("seshi 0.3.2\n");
     return 0;
   }
 
@@ -329,17 +329,26 @@ async function start(
     peer: contact,
     scopedDir: node.storage.convoDir(convo.id),
     ...(contact.tier === 3 ? { repo: process.cwd() } : {}),
+    onNote: (line) => out(`  ! ${line}\n`),
   });
   live.convoId = convo.id;
   live.side = side;
 
   out(`\n  ${mode} with ${contact.name}\n  ${objective}\n\n  starting your agent...\n`);
-  await side.open();
-
-  const opening = await side.openingTurn();
-  print("you", opening);
-  await node.send(convo.id, opening);
-  daemon.broadcast(turnEvent(convo.id, "you", opening));
+  try {
+    await side.open();
+    const opening = await side.openingTurn();
+    print("you", opening);
+    await node.send(convo.id, opening);
+    daemon.broadcast(turnEvent(convo.id, "you", opening));
+  } catch (err) {
+    // The other person has already paired and is waiting. Close the
+    // conversation on disk so a late frame for it is refused, and say why.
+    node.markClosed(convo.id);
+    side.stop();
+    void daemon.stop();
+    throw err;
+  }
 
   return await runLoop(node, side, daemon, contact, convo.id, convo.budget.turns);
 }
@@ -460,7 +469,10 @@ async function join(link: string, objective: string): Promise<number> {
   node.expectOpenFrom(contact.fingerprint, briefFrom(stated), "decide");
   out(`\n  waiting for ${contact.name} to open...\n`);
 
-  const first = await node.waitForTurn({ timeoutMs: 600_000 });
+  // Only a turn that opens a NEW conversation. The relay holds frames for
+  // hours, and a fresh join was once handed the previous conversation's last
+  // frames and took the first as the other side opening.
+  const first = await node.waitForTurn({ timeoutMs: 600_000, opening: true });
   const convo = node.storage.getConvo(first.envelope.convo);
   if (convo === null) throw new Error("their opening turn did not open a conversation");
 
@@ -470,19 +482,26 @@ async function join(link: string, objective: string): Promise<number> {
     peer: contact,
     scopedDir: node.storage.convoDir(convo.id),
     ...(contact.tier === 3 ? { repo: process.cwd() } : {}),
+    onNote: (line) => out(`  ! ${line}\n`),
   });
   live.convoId = convo.id;
   live.side = side;
   out(`  ${convo.mode} with ${contact.name}\n  starting your agent...\n`);
-  await side.open();
-
-  print(contact.name, first.envelope);
-  daemon.broadcast(turnEvent(convo.id, contact.fingerprint.slice(0, 16), first.envelope));
-  side.observe(first.envelope);
-  const reply = await side.replyTo(first.envelope);
-  print("you", reply);
-  await node.send(convo.id, reply);
-  daemon.broadcast(turnEvent(convo.id, "you", reply));
+  try {
+    await side.open();
+    print(contact.name, first.envelope);
+    daemon.broadcast(turnEvent(convo.id, contact.fingerprint.slice(0, 16), first.envelope));
+    side.observe(first.envelope);
+    const reply = await side.replyTo(first.envelope);
+    print("you", reply);
+    await node.send(convo.id, reply);
+    daemon.broadcast(turnEvent(convo.id, "you", reply));
+  } catch (err) {
+    node.markClosed(convo.id);
+    side.stop();
+    void daemon.stop();
+    throw err;
+  }
 
   return await runLoop(node, side, daemon, contact, convo.id, convo.budget.turns);
 }
@@ -503,6 +522,9 @@ async function runLoop(
     daemon.broadcast({ kind: "closed", at: at(), convo: convoId, because });
   };
   const stop = (): void => {
+    // Closed on disk first: anything the relay hands us for this conversation
+    // from now on is a late frame, and refused as one.
+    node.markClosed(convoId);
     side.discardWorktree();
     side.stop();
     node.close();
@@ -544,7 +566,7 @@ async function runLoop(
       quiet.unref();
       let inbound;
       try {
-        inbound = await node.waitForTurn({ timeoutMs: 600_000 });
+        inbound = await node.waitForTurn({ timeoutMs: 600_000, convo: convoId });
       } catch {
         clearTimeout(quiet);
         showRejects();

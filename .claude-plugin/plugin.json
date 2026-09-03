@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "seshi",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Your Claude talks to their Claude. Pair with someone by short code, then hold a bounded conversation between your two Claude Code sessions across the internet. Each side thinks on its own subscription; the relay only ever sees ciphertext. No npm install, no API key.",
   "author": {
     "name": "Jiffi",

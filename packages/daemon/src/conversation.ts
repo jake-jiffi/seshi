@@ -94,7 +94,17 @@ export type ConversationOptions = {
    * touched and never changes branch.
    */
   repo?: string;
+  /** Waits between retries of a turn the model service refused as overloaded. */
+  retryDelaysMs?: number[];
+  /** One line for the human when something worth knowing happens mid-turn. */
+  onNote?: (line: string) => void;
 };
+
+/** Anthropic's overload and rate-limit answers, as they reach us through Claude Code. */
+const TRANSIENT = /overloaded|529|rate.?limit|too many requests|temporar/i;
+
+/** Five seconds, then fifteen, then thirty: about a minute of patience in total. */
+const RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
 
 export class Conversation {
   readonly #node: SeshiNode;
@@ -118,12 +128,16 @@ export class Conversation {
   readonly #pendingHuman: string[] = [];
   /** Every distinct detection over the run, with the turn it first fired on. */
   readonly #fired = new Map<string, Detection & { turn: number }>();
+  readonly #retryDelays: number[];
+  readonly #note: (line: string) => void;
 
   constructor(opts: ConversationOptions) {
     this.#node = opts.node;
     this.#convo = opts.convo;
     this.#peer = opts.peer;
     this.#me = opts.node.fingerprint;
+    this.#retryDelays = opts.retryDelaysMs ?? RETRY_DELAYS_MS;
+    this.#note = opts.onNote ?? (() => {});
 
     const tier = opts.tier ?? opts.peer.tier;
     if (tier === 1) {
@@ -384,8 +398,33 @@ export class Conversation {
     return this.#seq >= this.#convo.budget.turns;
   }
 
+  /**
+   * One model turn, retried when the service says it is overloaded.
+   *
+   * A 529 from Anthropic killed an opening turn in a live run and the whole
+   * conversation with it, after the other person had already paired. The
+   * error is transient by its own description, so it gets about a minute of
+   * patience before it is allowed to end anything.
+   */
+  async #ask(prompt: string): Promise<string> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.#agent.send(prompt);
+      } catch (err) {
+        const message = (err as Error).message;
+        const wait = this.#retryDelays[attempt];
+        if (wait === undefined || !TRANSIENT.test(message) || !this.#agent.running) throw err;
+        this.#note(
+          `the model service is overloaded; trying again in ${Math.round(wait / 1000)}s ` +
+            `(${attempt + 1} of ${this.#retryDelays.length})`,
+        );
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
+  }
+
   async #turn(basePrompt: string): Promise<Envelope> {
-    const raw = await this.#agent.send(this.#withHumanWords(basePrompt));
+    const raw = await this.#ask(this.#withHumanWords(basePrompt));
     let parsed = parseEnvelopeReply(raw);
 
     // The ledger is what makes a conversation converge instead of drift, and
@@ -401,7 +440,7 @@ export class Conversation {
     // the artefact called a signed decision "agreed by one side only".
     if (parsed.ledger === undefined && parsed.act !== "NOT_UNDERSTOOD" && this.#ledger.all().length > 0) {
       const issues = this.#ledger.all().map((i) => `  ${i.id} [${i.state}] ${i.text}`).join("\n");
-      const again = await this.#agent.send(
+      const again = await this.#ask(
         `Your reply left out the 'ledger' field. Send the SAME envelope again, same act, same ` +
           `headline, same body, with 'ledger' carrying the current state of every issue below. ` +
           `Valid states: open, claimed, proposed, agreed, parked, escalated.\n${issues}`,

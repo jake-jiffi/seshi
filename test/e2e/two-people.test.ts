@@ -432,3 +432,58 @@ test("a stranger flooding frames cannot grow the reject list without bound", asy
   assert.ok(dave.rejects.length <= 256, `rejects grew to ${dave.rejects.length}, past the cap`);
   assert.match(dave.rejects[dave.rejects.length - 1]!.reason, /unknown contact/);
 });
+
+test("a frame for a closed conversation is refused, not filed and not handed to a waiter", async (t) => {
+  const { jake, dave } = await twoPeople(t);
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
+  const convo = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
+  joinConvo(dave, convo.id, jake.fingerprint);
+  dave.markClosed(convo.id);
+
+  await jake.send(convo.id, { seq: 0, prev: null, act: "CLOSE", headline: "late", body: "arrived after the end" });
+  await assert.rejects(() => dave.waitForTurn({ timeoutMs: 800 }), /timed out/);
+  assert.ok(dave.rejects.some((r) => /is closed/.test(r.reason)), JSON.stringify(dave.rejects));
+  assert.equal(dave.storage.readLog(convo.id, jake.fingerprint).length, 0, "nothing appended to a finished log");
+});
+
+test("a wait scoped to one conversation drops a turn for another and records why", async (t) => {
+  const { jake, dave } = await twoPeople(t);
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
+  const old = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
+  const current = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
+  joinConvo(dave, old.id, jake.fingerprint);
+  joinConvo(dave, current.id, jake.fingerprint);
+
+  await jake.send(old.id, { seq: 0, prev: null, act: "COUNTER", headline: "stale", body: "from before" });
+  await jake.send(current.id, { seq: 0, prev: null, act: "PROPOSE", headline: "live", body: "the real one" });
+
+  const got = await dave.waitForTurn({ timeoutMs: 3000, convo: current.id });
+  assert.equal(got.envelope.headline, "live");
+  assert.ok(dave.rejects.some((r) => /arrived while/.test(r.reason) && r.reason.includes(old.id)), JSON.stringify(dave.rejects));
+});
+
+test("a wait for an opening ignores a stale turn for an existing conversation", async (t) => {
+  // The live-run bug: a fresh join was handed the previous conversation's last
+  // frames off the relay's queue and took the first one as the other side opening.
+  const { jake, dave } = await twoPeople(t);
+  dave.pairWithBundle(jake.inviteBundle());
+  jake.pairWithBundle(dave.inviteBundle());
+  dave.verify(jake.fingerprint);
+  dave.storage.putContact({ ...dave.contact(jake.fingerprint), tier: 2 });
+  const old = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
+  joinConvo(dave, old.id, jake.fingerprint);
+
+  dave.expectOpenFrom(jake.fingerprint, BRIEF, "decide");
+  const waiting = dave.waitForTurn({ timeoutMs: 4000, opening: true });
+
+  await jake.send(old.id, { seq: 0, prev: null, act: "CLOSE", headline: "stale close", body: "from the last run" });
+  const fresh = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
+  await jake.send(fresh.id, { seq: 0, prev: null, act: "BRIEF", headline: "opening for real", body: "hello" });
+
+  const got = await waiting;
+  assert.equal(got.envelope.convo, fresh.id);
+  assert.equal(got.opened, true);
+  assert.ok(dave.rejects.some((r) => /waiting for a new conversation to open/.test(r.reason)));
+});

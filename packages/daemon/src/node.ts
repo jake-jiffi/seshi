@@ -80,7 +80,21 @@ export type SeshiNodeOptions = {
   defaultTier?: 1 | 2 | 3;
 };
 
-export type InboundTurn = { envelope: Envelope; contact: Contact };
+export type InboundTurn = {
+  envelope: Envelope;
+  contact: Contact;
+  /** True when this turn is the one that opened a conversation via `expectOpenFrom`. */
+  opened?: boolean;
+};
+
+/** What a caller of `waitForTurn` is prepared to accept. */
+export type TurnFilter = {
+  timeoutMs?: number;
+  /** Only turns in this conversation. */
+  convo?: string;
+  /** Only a turn that just opened a new conversation. */
+  opening?: boolean;
+};
 
 export type Pairing = {
   contact: Contact;
@@ -139,7 +153,12 @@ export class SeshiNode {
   readonly #client: RelayClient;
   readonly #inbox: InboundTurn[] = [];
   readonly #rejects: Array<{ from: string; reason: string }> = [];
-  readonly #waiters: Array<(t: InboundTurn) => void> = [];
+  readonly #waiters: Array<{
+    push: (t: InboundTurn) => void;
+    accepts: (t: InboundTurn) => boolean;
+    /** What the waiter is waiting for, for the reject a stale turn gets. */
+    describe: string;
+  }> = [];
   /** One hash chain per (conversation, party). Keyed `${convo}/${party}`. */
   readonly #chains = new Map<string, Chain>();
   /**
@@ -443,13 +462,38 @@ export class SeshiNode {
     await this.#client.send(this.contact(convo.peer), envelope);
   }
 
-  /** Resolve with the next inbound turn, or reject on timeout. */
-  waitForTurn(opts: { timeoutMs?: number } = {}): Promise<InboundTurn> {
-    const queued = this.#inbox.shift();
-    if (queued !== undefined) return Promise.resolve(queued);
+  /**
+   * Resolve with the next inbound turn the filter accepts, or reject on timeout.
+   *
+   * The filter is not optional in spirit. A process runs one conversation, so
+   * any turn for another one is stale: the relay holds frames for six hours,
+   * and in a live run a fresh `join` was handed the previous conversation's
+   * last two frames and treated the first as the other side opening. A turn
+   * the filter refuses is recorded as a reject and dropped, never queued for
+   * a later caller to trip over.
+   */
+  waitForTurn(opts: TurnFilter = {}): Promise<InboundTurn> {
+    const accepts = (t: InboundTurn): boolean =>
+      (opts.convo === undefined || t.envelope.convo === opts.convo) &&
+      (opts.opening !== true || t.opened === true);
+    const describe =
+      opts.opening === true
+        ? "waiting for a new conversation to open"
+        : `${opts.convo ?? "another conversation"} is running`;
+    const refuse = (t: InboundTurn): void =>
+      this.#noteReject({
+        from: t.contact.fingerprint,
+        reason: `turn ${t.envelope.seq} in ${t.envelope.convo} arrived while ${describe}`,
+      });
+
+    while (this.#inbox.length > 0) {
+      const queued = this.#inbox.shift() as InboundTurn;
+      if (accepts(queued)) return Promise.resolve(queued);
+      refuse(queued);
+    }
     return new Promise<InboundTurn>((resolve, reject) => {
       const timer = setTimeout(() => {
-        const i = this.#waiters.indexOf(push);
+        const i = this.#waiters.findIndex((w) => w.push === push);
         if (i >= 0) this.#waiters.splice(i, 1);
         reject(new Error("timed out waiting for the peer's turn"));
       }, opts.timeoutMs ?? 30_000);
@@ -457,8 +501,19 @@ export class SeshiNode {
         clearTimeout(timer);
         resolve(t);
       };
-      this.#waiters.push(push);
+      this.#waiters.push({ push, accepts, describe });
     });
+  }
+
+  /**
+   * A conversation that has ended stays on disk, and a frame for it that turns
+   * up later (the relay holds them for hours) must be refused rather than
+   * appended to a finished log and handed to whoever is waiting next.
+   */
+  markClosed(convoId: string): void {
+    const convo = this.storage.getConvo(convoId);
+    if (convo === null || convo.state === "closed") return;
+    this.storage.putConvo({ ...convo, state: "closed" });
   }
 
   close(): void {
@@ -477,16 +532,25 @@ export class SeshiNode {
    */
   #deliver(envelope: Envelope, contact: Contact): void {
     let convo = this.storage.getConvo(envelope.convo);
+    let opened = false;
     if (convo === null) {
-      const opened = this.#tryOpen(envelope, contact);
-      if (opened === null) {
+      const fresh = this.#tryOpen(envelope, contact);
+      if (fresh === null) {
         this.#noteReject({
           from: contact.fingerprint,
           reason: `unknown conversation ${envelope.convo}: we never started or joined it`,
         });
         return;
       }
-      convo = opened;
+      convo = fresh;
+      opened = true;
+    }
+    if (convo.state === "closed") {
+      this.#noteReject({
+        from: contact.fingerprint,
+        reason: `conversation ${envelope.convo} is closed; a late frame for it was refused`,
+      });
+      return;
     }
     if (convo.peer !== contact.fingerprint) {
       this.#noteReject({
@@ -518,9 +582,26 @@ export class SeshiNode {
     chain.append(envelope, { tolerateGap: verdict === "gap" });
 
     this.storage.appendLog(envelope.convo, contact.fingerprint, envelope);
-    const waiter = this.#waiters.shift();
-    if (waiter !== undefined) waiter({ envelope, contact });
-    else this.#inbox.push({ envelope, contact });
+    const turn: InboundTurn = { envelope, contact, ...(opened ? { opened: true } : {}) };
+    const i = this.#waiters.findIndex((w) => w.accepts(turn));
+    if (i >= 0) {
+      const [waiter] = this.#waiters.splice(i, 1);
+      (waiter as { push: (t: InboundTurn) => void }).push(turn);
+      return;
+    }
+    if (this.#waiters.length > 0) {
+      // Someone is waiting and this is not what they are waiting for. The
+      // process runs one conversation, so a turn for anything else is stale,
+      // and parking it for a later caller is how a fresh join was once handed
+      // the previous conversation's closing frames.
+      const waiting = (this.#waiters[0] as { describe: string }).describe;
+      this.#noteReject({
+        from: contact.fingerprint,
+        reason: `turn ${envelope.seq} in ${envelope.convo} arrived while ${waiting}`,
+      });
+      return;
+    }
+    this.#inbox.push(turn);
   }
 
   /**

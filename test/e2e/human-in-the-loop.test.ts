@@ -62,6 +62,12 @@ process.stdin.on("data", (chunk) => {
     const replies = JSON.parse(fs.readFileSync(${JSON.stringify(queue)}, "utf8"));
     const text = turn === 0 ? "READY" : (replies[turn - 1] ?? replies[replies.length - 1]);
     turn += 1;
+    // A reply that starts with !ERROR is emitted the way Claude Code reports a
+    // failed turn: an is_error result carrying the service's message.
+    if (text.startsWith("!ERROR ")) {
+      process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: true, result: text.slice(7) }) + "\\n");
+      continue;
+    }
     process.stdout.write(JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text }] } }) + "\\n");
     process.stdout.write(JSON.stringify({ type: "result", subtype: "success", result: text }) + "\\n");
   }
@@ -79,7 +85,11 @@ const BRIEF: PublicBrief = {
   facts: [],
 };
 
-async function twoSides(t: { after: (fn: () => void | Promise<void>) => void }, replies: string[]) {
+async function twoSides(
+  t: { after: (fn: () => void | Promise<void>) => void },
+  replies: string[],
+  extra: { retryDelaysMs?: number[]; onNote?: (line: string) => void } = {},
+) {
   fakeClaude(replies);
   const relay = await startRelay({ port: 0 });
   const url = `ws://127.0.0.1:${relay.port}`;
@@ -90,7 +100,7 @@ async function twoSides(t: { after: (fn: () => void | Promise<void>) => void }, 
   const convo = jake.startConvo({ peer: "dave", mode: "decide", brief: BRIEF });
   const side = new Conversation({
     node: jake, convo, peer: jake.contact("dave"),
-    scopedDir: jake.storage.convoDir(convo.id), tier: 2,
+    scopedDir: jake.storage.convoDir(convo.id), tier: 2, ...extra,
   });
   t.after(async () => {
     side.stop();
@@ -299,4 +309,45 @@ test("watch lines carry the documented shape, and peer headlines arrive tagged",
   assert.equal(line({ kind: "say", at: "T", convo: "c", text: "go on" }), "T | c | you | HUMAN | go on");
   assert.equal(formatEvent(JSON.stringify({ id: 1, ok: true, result: { watching: true } })), null, "the ack is not an event");
   assert.equal(formatEvent("not json"), null);
+});
+
+test("a turn the service refuses as overloaded is retried, and the human is told", async (t) => {
+  const notes: string[] = [];
+  const { side, fromDave } = await twoSides(
+    t,
+    [
+      reply("BRIEF"),
+      "!ERROR API Error: 529 Overloaded. This is a server-side issue, usually temporary",
+      reply("COUNTER"),
+    ],
+    { retryDelaysMs: [10, 10, 10], onNote: (l) => notes.push(l) },
+  );
+  await side.openingTurn();
+  const p = fromDave(1, { act: "PROPOSE" });
+  side.observe(p);
+  const sent = await side.replyTo(p);
+  assert.equal(sent.act, "COUNTER", "the retry's reply is what ships");
+  assert.equal(notes.length, 1);
+  assert.match(notes[0]!, /overloaded; trying again in 0s \(1 of 3\)/);
+});
+
+test("a turn that keeps failing as overloaded gives up after the delays run out", async (t) => {
+  const boom = "!ERROR API Error: 529 Overloaded";
+  const { side, fromDave } = await twoSides(t, [reply("BRIEF"), boom, boom, boom, boom], { retryDelaysMs: [5, 5] });
+  await side.openingTurn();
+  const p = fromDave(1, { act: "PROPOSE" });
+  side.observe(p);
+  await assert.rejects(() => side.replyTo(p), /529 Overloaded/);
+});
+
+test("an error that is not transient is not retried", async (t) => {
+  const notes: string[] = [];
+  const { side, fromDave } = await twoSides(t, [reply("BRIEF"), "!ERROR invalid_request: prompt too long", reply("COUNTER")], {
+    retryDelaysMs: [5, 5, 5], onNote: (l) => notes.push(l),
+  });
+  await side.openingTurn();
+  const p = fromDave(1, { act: "PROPOSE" });
+  side.observe(p);
+  await assert.rejects(() => side.replyTo(p), /prompt too long/);
+  assert.equal(notes.length, 0);
 });
