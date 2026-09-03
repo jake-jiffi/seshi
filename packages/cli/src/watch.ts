@@ -78,6 +78,10 @@ export function formatEvent(line: string): string | null {
   const convo = String(e["convo"] ?? "").slice(0, 8);
   const s = (k: string): string => String(e[k] ?? "");
   switch (e["kind"]) {
+    case "invite":
+      return `${at} | - | seshi | INVITE | ${s("link")}`;
+    case "words":
+      return `${at} | - | seshi | WORDS | ${s("words")}   (paired with ${s("name")})`;
     case "turn":
       return `${at} | ${convo} | ${s("from")} | ${s("act")} | ${s("headline")}`;
     case "say":

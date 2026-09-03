@@ -22,8 +22,10 @@ import { escapePeerText, PEER_TAG } from "../../core/src/escape.ts";
 import { watch } from "./watch.ts";
 import {
   adoptDefaultRelay,
+  cleanDisplayName,
   DEFAULT_RELAY_NOTE,
   displayName,
+  nameIsDefaulted,
   relayUrl,
   seshiHome,
   writeConfig,
@@ -47,6 +49,7 @@ const USAGE = `seshi — your Claude talks to their Claude
   seshi decision <id>         read what a conversation produced
   seshi say "<words>"         cut in on the running conversation; both sides hear it
   seshi watch                 stream this machine's conversations, one line per event
+  seshi name "<name>"         what the other person sees you as
   seshi whoami                this machine's identity
 
 Node 24+. No npm install, no API key. Each side thinks on its own subscription.
@@ -92,7 +95,20 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
   if (cmd === "--version" || cmd === "-v") {
-    out("seshi 0.3.0\n");
+    out("seshi 0.3.1\n");
+    return 0;
+  }
+
+  if (cmd === "name") {
+    const raw = args.join(" ");
+    if (raw.trim() === "") {
+      out(`  ${displayName()}${nameIsDefaulted() ? "  (your username; nothing chosen yet)" : ""}\n`);
+      return 0;
+    }
+    const name = cleanDisplayName(raw);
+    if (name === null) throw new Error("a name needs at least one visible character");
+    writeConfig({ name });
+    out(`  the other person will see you as ${name}\n`);
     return 0;
   }
   if (cmd === "serve") {
@@ -152,6 +168,7 @@ async function main(argv: string[]): Promise<number> {
 
   if (adoptDefaultRelay()) out(`\n${DEFAULT_RELAY_NOTE}\n`);
   const relay = relayUrl();
+  if (cmd === "start") await ensureName();
 
   const node = await SeshiNode.open({ home: seshiHome(), relayUrl: relay, name: displayName() });
   const holdOpen = cmd === "start";
@@ -246,6 +263,30 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
+/**
+ * The name the other side sees, chosen once.
+ *
+ * It rides in the invite and becomes the contact's label on their machine.
+ * Left to default it is the OS username, and in the first two-sided run both
+ * sides were called jakeshelley. Asked at a terminal. On a pipe (the Claude
+ * Code commands hold stdin for the safety-word answer) the default is used
+ * and said out loud, and the commands set it with `seshi name` beforehand.
+ * Nothing is written on the pipe path, so a later terminal run still asks.
+ */
+async function ensureName(): Promise<void> {
+  if (!nameIsDefaulted()) return;
+  const fallback = displayName();
+  if (!process.stdin.isTTY) {
+    out(`  the other person will see you as ${fallback}. Change it any time: seshi name "<name>"\n`);
+    return;
+  }
+  const answer = cleanDisplayName(
+    await ask(`\n  What should the other person see you as? [${fallback}] `),
+  );
+  writeConfig({ name: answer ?? fallback });
+  out(`  the other person will see you as ${answer ?? fallback}\n`);
+}
+
 /** Publish an invite, confirm the words when someone takes it, then talk. */
 async function start(
   node: SeshiNode,
@@ -253,16 +294,28 @@ async function start(
   mode: string,
   objective: string,
 ): Promise<number> {
+  // The control socket opens before the invite, so a watcher sees the line to
+  // send and the four words, and a `say` this early is told nothing is running.
+  const live: Live = { convoId: null, side: null };
+  const daemon = await attachControl(node, live);
+  const at = (): string => new Date().toISOString();
+
   const pending = await node.invite();
+  const line = `seshi join ${formatLink(pending.code, relay)} "<what you want out of it>"`;
   out("\n");
   rule();
   out(`  Send this line to the person you want to talk to. It is not a secret.\n\n`);
-  out(`      seshi join ${formatLink(pending.code, relay)} "<what you want out of it>"\n\n`);
+  out(`      ${line}\n\n`);
   rule();
   out(`\n  waiting for them to join...\n`);
+  daemon.broadcast({ kind: "invite", at: at(), convo: "-", link: line });
 
   const paired = await pending.waitForPeer();
-  if (!(await confirmWords(paired.safetyWords, paired.contact.name))) return 1;
+  daemon.broadcast(wordsEvent(paired.safetyWords, paired.contact.name));
+  if (!(await confirmWords(paired.safetyWords, paired.contact.name))) {
+    void daemon.stop();
+    return 1;
+  }
   node.verify(paired.contact.fingerprint);
   // Re-pairing someone you already trust at 3 must not quietly demote them to 2.
   const known = node.contact(paired.contact.fingerprint);
@@ -277,8 +330,9 @@ async function start(
     scopedDir: node.storage.convoDir(convo.id),
     ...(contact.tier === 3 ? { repo: process.cwd() } : {}),
   });
+  live.convoId = convo.id;
+  live.side = side;
 
-  const daemon = await attachControl(node, side, convo.id);
   out(`\n  ${mode} with ${contact.name}\n  ${objective}\n\n  starting your agent...\n`);
   await side.open();
 
@@ -300,21 +354,27 @@ async function start(
  */
 type Control = Pick<Daemon, "broadcast" | "stop">;
 
+/** What the process is running right now. Filled in once pairing is done. */
+type Live = { convoId: string | null; side: Conversation | null };
+
 /** What the conversation runs with when the control socket could not start. */
 const NO_CONTROL: Control = { broadcast: () => {}, stop: () => Promise.resolve() };
 
-async function attachControl(node: SeshiNode, side: Conversation, convoId: string): Promise<Control> {
+async function attachControl(node: SeshiNode, live: Live): Promise<Control> {
   try {
     return await startDaemon({
       home: seshiHome(),
       idleTimeoutMs: 0,
-      current: () => convoId,
+      current: () => live.convoId,
       onSay: async (convo, text) => {
-        if (convo !== convoId) {
-          throw new Error(`the running conversation is ${convoId}, not ${convo}`);
+        if (live.convoId === null || live.side === null) {
+          throw new Error("no conversation is running yet; the other person has not joined");
         }
-        side.interject(text);
-        const e = await node.send(convoId, {
+        if (convo !== live.convoId) {
+          throw new Error(`the running conversation is ${live.convoId}, not ${convo}`);
+        }
+        live.side.interject(text);
+        const e = await node.send(live.convoId, {
           seq: 0,
           prev: null,
           act: "HUMAN",
@@ -350,6 +410,17 @@ function turnEvent(convo: string, from: string, e: Envelope): Record<string, unk
   return { kind: "turn", at: new Date().toISOString(), convo, from, act: e.act, headline };
 }
 
+/** The four words, for the watchers. The peer's name is theirs to claim, so it is escaped. */
+function wordsEvent(words: string[], peerName: string): Record<string, unknown> {
+  return {
+    kind: "words",
+    at: new Date().toISOString(),
+    convo: "-",
+    words: words.join(" "),
+    name: escapePeerText(peerName),
+  };
+}
+
 /** How long a peer may stay silent before the watchers are told. */
 const QUIET_AFTER_MS = 180_000;
 
@@ -357,12 +428,17 @@ const QUIET_AFTER_MS = 180_000;
 async function join(link: string, objective: string): Promise<number> {
   const { code, relay } = parseLink(link);
   writeConfig({ relay });
+  await ensureName();
 
   const node = await SeshiNode.open({ home: seshiHome(), relayUrl: relay, name: displayName() });
+  const live: Live = { convoId: null, side: null };
+  const daemon = await attachControl(node, live);
   out(`\n  relay ${relay}\n  pairing with ${code}...\n`);
 
   const paired = await node.joinWithCode(code);
+  daemon.broadcast(wordsEvent(paired.safetyWords, paired.contact.name));
   if (!(await confirmWords(paired.safetyWords, paired.contact.name))) {
+    void daemon.stop();
     node.close();
     return 1;
   }
@@ -395,7 +471,8 @@ async function join(link: string, objective: string): Promise<number> {
     scopedDir: node.storage.convoDir(convo.id),
     ...(contact.tier === 3 ? { repo: process.cwd() } : {}),
   });
-  const daemon = await attachControl(node, side, convo.id);
+  live.convoId = convo.id;
+  live.side = side;
   out(`  ${convo.mode} with ${contact.name}\n  starting your agent...\n`);
   await side.open();
 

@@ -40,6 +40,38 @@ node --version          # v24 or newer
 
 ---
 
+## In Claude Code, which is the way to do it
+
+Restart Claude Code after installing, so the plugin's commands and the live stream are loaded.
+
+One of you, in a Claude Code session:
+
+```
+/seshi:start
+```
+
+It asks two things: what the other person should see you as, and what you want to settle. It
+prints the line to send. The other person, in their Claude Code:
+
+```
+/seshi:join <that line>
+```
+
+It asks the same two things. Both sessions then show the four words. Compare them on a call, say
+yes, and both sessions stream the conversation and tell you when it is worth cutting in. The rest
+of this file is the terminal version of the same flow, for when there is no Claude Code session.
+
+---
+
+## Your name
+
+```bash
+seshi name "Jake"
+```
+
+That is what the other person sees, and it becomes your name in their contacts. Left unset it is
+your username, and the terminal asks the first time.
+
 ## Nobody runs a relay
 
 seshi ships pointed at `wss://relay.seshi.sh`. Jiffi runs it. It forwards sealed frames and holds

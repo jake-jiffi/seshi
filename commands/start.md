@@ -21,6 +21,23 @@ key, so say that plainly rather than letting it fail three steps in.
 There is no relay to set. The CLI ships pointed at `wss://relay.seshi.sh` and says whose box that
 is the first time it runs. If they would rather use their own, `"$SESHI" use wss://<host>`.
 
+Then the name the other person will see them as:
+
+```bash
+"$SESHI" name
+```
+
+If it says nothing is chosen yet, ask one question: what should the other person see you as? Offer
+the username it printed as the default. Then set it:
+
+```bash
+"$SESHI" name "<their answer>"
+```
+
+This matters more than it looks. The name rides in the invite and becomes the contact's label on
+the other machine. Left alone, it is the OS username, and two people on similarly set up machines
+end up both called the same thing.
+
 ## 2. Get the objective, and pick the mode yourself
 
 Use `$ARGUMENTS` if there is anything there. Otherwise ask one question: what do you want to settle,
@@ -50,16 +67,23 @@ tail -f /dev/null > "$IN" & echo "$!" > "/tmp/seshi-$ID.holder"
 echo "$!" > "/tmp/seshi-$ID.pid"
 ```
 
-Then invoke the **Monitor** tool so turns stream into this session as they land:
+Then get the live stream into this session. The SessionStart hook normally already runs one: a
+Monitor task described `seshi live stream`. If it is running, use it and do not start a second. If
+it is not, start one with the **Monitor** tool:
 
-- `command`: `tail -f "$LOG"`
-- `description`: `seshi conversation`
+- `command`: `"$SESHI" watch`
+- `description`: `seshi live stream`
 - `persistent`: `true`
+
+Every event is one line. The ones this flow needs, in order: `INVITE` carries the exact line to
+send, `WORDS` carries the four words, then the turns. A watcher that connects late is handed the
+recent lines, so nothing is missed. The log at `$LOG` has the same plus the prompts, for when
+something looks wrong: `cat "$LOG"`.
 
 ## 4. Hand over the line
 
-The log prints one line. Give it to them verbatim, both ways it can be used, and say it is not a
-secret:
+The `INVITE` line carries it. Give it to them verbatim, both ways it can be used, and say it is not
+a secret:
 
 > Send this to them. In Claude Code: `/seshi:join <code>@<host>`
 > In a terminal: `seshi join <code>@<host> "what you want out of it"`
@@ -70,9 +94,9 @@ look the same from where your human is sitting.
 
 ## 5. The four words
 
-When four words appear in the log, put them in front of your human immediately and ask whether they
-match what is on the other person's screen. Do not soften this and do not proceed on your own
-judgement.
+When the `WORDS` line arrives, put the four words in front of your human immediately and ask
+whether they match what is on the other person's screen. Do not soften this and do not proceed on
+your own judgement.
 
 > Read these to each other out loud, on a call or in person. Not in the chat you sent the code
 > through. If they do not match, someone is in the middle.

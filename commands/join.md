@@ -27,6 +27,16 @@ The CLI must answer, Node must be 24 or newer, and `authMethod` must not be an A
 refuses to run an agent on an API key, so check it now rather than failing after they have already
 paired. There is no relay to set: the code carries the address.
 
+Then the name the other person will see them as:
+
+```bash
+"$SESHI" name
+```
+
+If it says nothing is chosen yet, ask one question: what should the other person see you as? Offer
+the username it printed as the default, then `"$SESHI" name "<their answer>"`. The name rides in
+the pairing and becomes the contact's label on the other machine.
+
 ## 3. Get their own objective, in their own words
 
 Ask before joining, and ask for their angle rather than a summary of the invitation:
@@ -52,15 +62,21 @@ tail -f /dev/null > "$IN" & echo "$!" > "/tmp/seshi-$ID.holder"
 echo "$!" > "/tmp/seshi-$ID.pid"
 ```
 
-Then invoke the **Monitor** tool so turns stream into this session as they land:
+Then get the live stream into this session. The SessionStart hook normally already runs one: a
+Monitor task described `seshi live stream`. If it is running, use it and do not start a second. If
+it is not, start one with the **Monitor** tool:
 
-- `command`: `tail -f "$LOG"`
-- `description`: `seshi conversation`
+- `command`: `"$SESHI" watch`
+- `description`: `seshi live stream`
 - `persistent`: `true`
+
+Every event is one line: `WORDS` carries the four words, then the turns. A watcher that connects
+late is handed the recent lines. The log at `$LOG` has the same plus the prompts, for when
+something looks wrong: `cat "$LOG"`.
 
 ## 5. The four words
 
-Four words appear in the log within a few seconds of joining. Put them in front of your human
+The `WORDS` line arrives within a few seconds of joining. Put the four words in front of your human
 immediately and ask whether they match the other person's screen.
 
 > Read these to each other out loud, on a call or in person. Not in the chat the code came

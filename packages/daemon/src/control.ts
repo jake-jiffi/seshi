@@ -107,6 +107,15 @@ export async function startControlServer(opts: ControlServerOptions): Promise<Co
   const authed = new Set<Socket>();
   /** The subset of those that asked to receive events. */
   const watchers = new Set<Socket>();
+  /**
+   * The last few events, replayed to a watcher when it subscribes. `seshi
+   * watch` polls for the socket every two seconds and the invite is broadcast
+   * the instant the socket exists, so without this a watcher reliably missed
+   * the one line the human needs to send. A session that starts mid-way gets
+   * the recent context for the same price.
+   */
+  const recent: string[] = [];
+  const RECENT_MAX = 20;
 
   const server = createServer();
   server.on("connection", (socket) => onConnection(socket));
@@ -224,7 +233,8 @@ export async function startControlServer(opts: ControlServerOptions): Promise<Co
 
       if (verb === "watch") {
         watchers.add(socket);
-        write({ id, ok: true, result: { watching: true } });
+        write({ id, ok: true, result: { watching: true, replayed: recent.length } });
+        for (const line of recent) if (!closed && socket.writable) socket.write(line);
         return;
       }
 
@@ -256,6 +266,8 @@ export async function startControlServer(opts: ControlServerOptions): Promise<Co
     clientCount: () => authed.size,
     broadcast(event: unknown): void {
       const line = `${JSON.stringify({ t: "event", event })}\n`;
+      recent.push(line);
+      if (recent.length > RECENT_MAX) recent.splice(0, recent.length - RECENT_MAX);
       for (const socket of watchers) if (socket.writable) socket.write(line);
     },
     close(): Promise<void> {
