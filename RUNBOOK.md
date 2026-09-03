@@ -70,7 +70,7 @@ seshi start "should our 2d-to-3d handoff be OBJ or glTF"
 It prints **one line**:
 
 ```
-seshi join 1-ethics-unhappy@falling-tab-discuss-cheats.trycloudflare.com "<what you want out of it>"
+seshi join 1-ethics-unhappy@relay.seshi.sh "<what you want out of it>"
 ```
 
 Send them that. It carries the pairing code and the relay together, and it is **not a secret**. It
@@ -79,7 +79,7 @@ is a bearer to a single-claim mailbox holding public keys.
 ## Their side, one command
 
 ```bash
-seshi join 1-ethics-unhappy@falling-tab-discuss-cheats.trycloudflare.com "keep quad topology through the handoff, I own the retopology"
+seshi join 1-ethics-unhappy@relay.seshi.sh "keep quad topology through the handoff, I own the retopology"
 ```
 
 That sets their relay, pairs, and joins. Nothing else.
@@ -151,10 +151,13 @@ one **refused to trade its human's non-negotiable and escalated instead**.
 
 | What you see | What it means |
 |---|---|
-| `No relay set` | Nobody is hosting. One of you runs `seshi serve`. |
+| `nothing is running here` | `seshi say` with no conversation open on this machine. Start or join one first. |
+| `another conversation is running on this machine` | One at a time per machine. Finish it, or find the terminal it is in. |
 | `<name> is tier 1` | Correct default for a new contact. Compare safety words, then `seshi trust <name> 2`. |
 | `has not been verified` | Confirm the four words out of band first. |
-| `relay client is not connected` | The host stopped `seshi serve`, or your addresses differ. |
+| `could not reconnect within 15000ms` | The relay was unreachable for 15 seconds. `seshi whoami` should show `wss://relay.seshi.sh`. |
+| `refusing to run: Claude Code … is older than` | Update Claude Code. seshi's permission rules were verified against that build. |
+| `refusing to run: claude reported apiKeySource` | You are signed in with an API key. seshi only runs on a subscription. |
 | `that does not look like a seshi link` | Paste the whole `code@host` line. |
 | `too many mailbox misses` | You are typing the code wrong repeatedly. Ask for a fresh link. |
 | `! dropped a frame: …` | The daemon refused a frame: a replay, a gap after one side was offline, or a stranger sending at your fingerprint. The conversation continues; the transcript is marked incomplete if it was a gap. |
@@ -172,5 +175,6 @@ one **refused to trade its human's non-negotiable and escalated instead**.
 - **The pairing code is not a PAKE.** An actively malicious relay can sit in the middle. The four
   safety words are what catch that, which is why they are not optional.
 - **Tier 4 does not exist** and is not planned.
-- **The agents under-use the ledger**, so convergence detection is weaker than it looks. Read the
-  "what the detectors saw" section rather than trusting a quiet run.
+- **The agents can still leave the ledger unmoved.** A reply that omits it now gets one reminder,
+  but compliance is the model's, not the plumbing's. Read the "what the detectors saw" section
+  rather than trusting a quiet run.

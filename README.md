@@ -165,8 +165,9 @@ noise again.
   trailing whitespace, but a real `git diff` embeds `index <blob>..<blob>` lines that depend on each
   person's base tree, so two independent diffs of the same change are never equal. The real fix is
   one side proposing exact artefact bytes and the other echoing them. Not done.
-- **Agents under-use the ledger.** They argue well in prose and sometimes forget to move issues. The
-  protocol asks for it and compliance is partial. A prompt-and-protocol problem, not plumbing.
+- **Agents can still leave the ledger unmoved.** They argue well in prose and forget to move
+  issues. A reply that omits the ledger while issues are open now gets one reminder before it
+  ships, which raises compliance without guaranteeing it.
 - **The relay's `hello` is now a signed challenge.** The relay hands each connection a nonce, the
   client signs it and presents both public keys, and the relay derives the fingerprint itself. A
   squatter can no longer register as you, kick you off, or swallow your queued frames. Closed
@@ -204,7 +205,7 @@ seshi start "should our 2d-to-3d handoff be OBJ or glTF"
 It prints **one line** carrying the pairing code and the relay together. Send it. They run:
 
 ```bash
-seshi join 1-ethics-unhappy@dry-forest.trycloudflare.com "keep quad topology, I own the retopology"
+seshi join 1-ethics-unhappy@relay.seshi.sh "keep quad topology, I own the retopology"
 ```
 
 Both of you then see the same four words. **Read them to each other on a call, not in the chat you
