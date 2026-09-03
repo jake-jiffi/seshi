@@ -73,7 +73,7 @@ fs.writeFileSync(${JSON.stringify(spawnLog)}, JSON.stringify({
 const emit = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 const init = (apiKeySource) => emit({
   type: "system", subtype: "init", session_id: "fake-session",
-  apiKeySource, claude_code_version: "fake", model: "fake-model",
+  apiKeySource, claude_code_version: "2.1.240", model: "fake-model",
 });
 const assistantText = (text) => emit({
   type: "assistant",

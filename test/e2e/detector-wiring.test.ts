@@ -69,7 +69,7 @@ process.stdin.on("data", (chunk) => {
       init = true;
       process.stdout.write(JSON.stringify({
         type: "system", subtype: "init", session_id: "fake",
-        apiKeySource: "none", claude_code_version: "fake", model: "fake",
+        apiKeySource: "none", claude_code_version: "2.1.240", model: "fake",
       }) + "\\n");
     }
     const replies = JSON.parse(fs.readFileSync(${JSON.stringify(queue)}, "utf8"));

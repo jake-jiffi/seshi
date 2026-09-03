@@ -51,6 +51,24 @@ export type PeerAgentOptions = {
 const DEFAULT_START_TIMEOUT_MS = 300_000;
 
 /**
+ * The Claude Code build the tier deny list and the stream parsing were
+ * verified against. Raise it when re-auditing on an upgrade (spec 11.5).
+ */
+export const MIN_CLAUDE_CODE = "2.1.240";
+
+/** `a >= b` for dotted numeric versions. Anything non-numeric compares as 0. */
+export function atLeast(a: string, b: string): boolean {
+  const parse = (v: string): number[] => v.split(".").map((p) => Number.parseInt(p, 10) || 0);
+  const x = parse(a);
+  const y = parse(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d !== 0) return d > 0;
+  }
+  return true;
+}
+
+/**
  * The one thing seshi ever says to a model it has not yet vetted.
  *
  * A `claude -p --input-format stream-json` child emits nothing but hook chatter
@@ -368,6 +386,28 @@ export class PeerAgent extends EventEmitter {
       const error = new Error(
         `refusing to run: claude reported apiKeySource ${JSON.stringify(source)}, ` +
           `expected "none". seshi only ever thinks on the user's own subscription.`,
+      );
+      const pending = this.#onInitEvent;
+      this.#onInitEvent = null;
+      pending?.reject(error);
+      this.#settleTurn(null, error);
+      return;
+    }
+
+    // The tier deny list is an enumeration of tool names and the stream
+    // parsing was verified against one build. A newer Claude Code may add a
+    // tool the list does not name; an older one may not honour the settings
+    // this process relies on. Refuse anything older than the verified build,
+    // and refuse a missing or unreadable version the same way: an init event
+    // that does not say what it is cannot be trusted to behave.
+    const version = event["claude_code_version"];
+    if (typeof version !== "string" || !atLeast(version, MIN_CLAUDE_CODE)) {
+      this.#child?.kill("SIGKILL");
+      this.#stopped = true;
+      const error = new Error(
+        `refusing to run: Claude Code ${typeof version === "string" ? version : "of unknown version"} ` +
+          `is older than ${MIN_CLAUDE_CODE}, the build seshi's permission rules were verified ` +
+          `against. Update Claude Code and try again.`,
       );
       const pending = this.#onInitEvent;
       this.#onInitEvent = null;
