@@ -1,0 +1,13 @@
+node_modules
+.git
+docs
+reference
+test
+packages/cli
+packages/core
+packages/daemon
+skills
+hooks
+bin
+*.md
+build-manifest.json
