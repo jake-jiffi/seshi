@@ -15,7 +15,7 @@ ROOT="$(dirname "$HERE")"
 for candidate in \
   "$ROOT/packages/cli/src/index.ts" \
   "$(dirname "$ROOT")/packages/cli/src/index.ts" \
-  "$CLAUDE_PLUGIN_ROOT/packages/cli/src/index.ts"; do
+  "${CLAUDE_PLUGIN_ROOT:-}/packages/cli/src/index.ts"; do
   [ -f "$candidate" ] && CLI="$candidate" && break
 done
 
