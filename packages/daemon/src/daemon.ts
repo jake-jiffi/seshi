@@ -102,7 +102,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       const convo =
         typeof named === "string" && named !== "" ? named : (opts.current?.() ?? null);
       if (convo === null) {
-        throw new Error("no conversation is running here; pass a conversation id");
+        throw new Error(
+          "no conversation is running here yet. If you are waiting for someone to join, say it " +
+            "again once they have; otherwise pass a conversation id.",
+        );
       }
       const text = requireString(args, "text");
       if (storage.getConvo(convo) === null) throw new Error(`unknown conversation: ${convo}`);
