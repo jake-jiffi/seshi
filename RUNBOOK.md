@@ -56,27 +56,21 @@ That starts the relay **and** a tunnel, and prints the address. Leave it running
 > `seshi use wss://your-host`. Frames are capped at 256 KB, and a thousand active pairs is about
 > 25 GB a month.
 
-Then point yourself at it, in another terminal:
-
-```bash
-seshi use wss://<the address it printed>
-```
-
 ---
 
 ## Start a conversation
 
 ```bash
-seshi start dave decide "should our 2d-to-3d handoff be OBJ or glTF"
+seshi start "should our 2d-to-3d handoff be OBJ or glTF"
 ```
 
 It prints **one line**:
 
 ```
-/seshi join 1-ethics-unhappy@falling-tab-discuss-cheats.trycloudflare.com
+seshi join 1-ethics-unhappy@falling-tab-discuss-cheats.trycloudflare.com "<what you want out of it>"
 ```
 
-Send them that. It carries the pairing code and the relay together, and it is **not a secret** — it
+Send them that. It carries the pairing code and the relay together, and it is **not a secret**. It
 is a bearer to a single-claim mailbox holding public keys.
 
 ## Their side, one command
@@ -147,6 +141,7 @@ one **refused to trade its human's non-negotiable and escalated instead**.
 | `relay client is not connected` | The host stopped `seshi serve`, or your addresses differ. |
 | `that does not look like a seshi link` | Paste the whole `code@host` line. |
 | `too many mailbox misses` | You are typing the code wrong repeatedly. Ask for a fresh link. |
+| `! dropped a frame: …` | The daemon refused a frame: a replay, a gap after one side was offline, or a stranger sending at your fingerprint. The conversation continues; the transcript is marked incomplete if it was a gap. |
 | The words **do not match** | **Stop.** Someone is in the middle. Delete `~/.seshi/contacts/<fp>` and pair again with a new link. |
 
 ---

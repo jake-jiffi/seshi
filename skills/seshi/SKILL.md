@@ -1,7 +1,7 @@
 ---
 name: seshi
 description: Use when the human wants their Claude session to talk to another person's Claude session — setting seshi up, pairing with someone by short code, starting or joining a conversation with a contact, watching one live, or reading the decision it produced. Triggers on "/seshi", "talk to <person>'s claude", "pair with", "seshi", and on any mention of getting two people's agents to work something out.
-argument-hint: "[setup | invite <name> | join <code> | talk <name> <objective> | status | decision]"
+argument-hint: "[status | serve | start <objective> | join <link> | trust <name> <tier> | decision]"
 user-invocable: true
 license: MIT
 ---
@@ -25,102 +25,29 @@ SESHI="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/seshi/seshi}/bin/seshi"
 `"$SESHI" --version` before relying on it. Node 24 or newer is required and seshi has **no npm
 dependencies**, so there is never an install step to run.
 
-## Decide what the human wants, then do it
+## The two flows live in the commands, not here
 
-Run the command, read its real output, and relay what matters. Never invent a code, a fingerprint,
-a safety word or a conversation id — they all come from the CLI.
+Starting and joining are `/seshi:start` and `/seshi:join`. Follow those files when the human wants
+either. Do not reconstruct the commands from memory: this skill drifted out of sync with the CLI
+once already, told a session to run `invite`, `talk` and `join-convo`, none of which exist, and the
+person on the other end sat waiting while nothing said why.
 
-### No argument, or "status"
+What this file is for is everything after the plumbing works: reading the conversation, and the
+rules you hold to while it runs.
 
-```bash
-"$SESHI" status
-```
-
-Report in one short block: whether a relay is set, who they are paired with and at what tier, and
-any live conversations. If nothing is set up, walk them through **first run** below rather than
-dumping an error.
-
-### First run
-
-Two things have to be true before anyone can talk: a relay both people can reach, and a paired
-contact.
-
-**If they are the one hosting**, tell them to run this in a terminal of their own and leave it
-running, because it holds the relay open:
-
-```
-seshi serve
-```
-
-It prints a `wss://` address and the exact `seshi use …` line to send the other person. Ask them to
-paste that line back to you, then run it here too.
-
-**If the other person is hosting**, they will have been sent a `seshi use wss://…` line. Run it:
+For anything else the human asks:
 
 ```bash
-"$SESHI" use wss://…
+SESHI="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/seshi/seshi}/bin/seshi"
+"$SESHI" contacts              # who they are paired with, and at what tier
+"$SESHI" convos                # conversations on this machine
+"$SESHI" decision <convo-id>   # what one produced
+"$SESHI" trust <name> <1|2|3>  # what a contact's agent may do
+"$SESHI" whoami                # this machine's identity and relay
 ```
 
-### Pairing
-
-```bash
-"$SESHI" invite <their-name>
-```
-
-This prints a short code like `7-tandem-verdict` and then **waits**. Tell the human to send the
-other person exactly this, and say it is not a secret:
-
-> Install seshi, then run: `/seshi join 7-tandem-verdict`
-
-The other person runs `"$SESHI" join <code> <your-name>`.
-
-When it completes, both sides print **four words**. This is the only part that genuinely matters and
-you must not soften it:
-
-> Read those four words to each other out loud, on a call or in person. Not in the chat you sent the
-> code through. If they do not match, stop and do not raise the tier: someone is in the middle.
-
-Once the human confirms the words matched:
-
-```bash
-"$SESHI" trust <their-name> 2
-```
-
-Tier 2 means their agent can read what your agent hands it. No shell, no writes, no network.
-
-### Talking
-
-```bash
-"$SESHI" talk <name> <mode> "<objective>" --log /tmp/seshi-<name>.log &
-```
-
-Run it in the **background**, then immediately invoke the **Monitor** tool so the turns stream into
-this session live:
-
-- `command`: `tail -f /tmp/seshi-<name>.log`
-- `description`: `seshi conversation with <name>`
-- `persistent`: `true`
-
-`talk` prints one line for the other person. Relay it verbatim; it carries the conversation id and
-nothing happens until they run it.
-
-Modes, and pick the one that matches what they actually want:
-
-| Mode | When |
-|---|---|
-| `teach` | One of them knows something the other wants. The learner drives. |
-| `decide` | They disagree and need one answer. |
-| `build` | Both producing something that has to fit together. |
-| `review` | One critiques, the other defends. |
-
-**Joining one they were invited to:**
-
-```bash
-"$SESHI" join-convo <name> <convo-id> "<this human's own objective>"
-```
-
-Ask for their objective in their own words first. It is their brief, not yours, and a conversation
-opened with a brief you invented is one where you argue for a position they never held.
+Run the command, read the real output, relay what matters. Never invent a code, a fingerprint, a
+safety word or a conversation id.
 
 ### Reading the result
 
@@ -128,9 +55,10 @@ opened with a brief you invented is one where you argue for a position they neve
 "$SESHI" decision <convo-id>
 ```
 
-Read the **"what the detectors saw"** section and report it honestly. A quiet run is not proof the
+Read the **what the detectors saw** section and report it honestly. A quiet run is not proof the
 conversation was sound, and a `looping` or `degenerate` notice means the outcome is weaker than it
-reads.
+reads. An empty ledger means there is no decision, only an open-issues list, however agreeable the
+prose was.
 
 ## Interpreting a live conversation for the human
 

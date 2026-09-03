@@ -41,3 +41,13 @@ test("a host containing an @ in the code half still splits on the last one", () 
   // Codes never contain @, but be certain the split is unambiguous.
   assert.equal(parseLink("a-b-c@example.com").relay, "wss://example.com");
 });
+
+test("a private network address keeps plain ws, a public one is forced to wss", () => {
+  for (const lan of ["192.168.157.240:8787", "10.0.0.4:8787", "172.16.3.9:8787", "127.0.0.1:8787"]) {
+    assert.equal(parseLink(`7-tandem-verdict@${lan}`).relay, `ws://${lan}`, `not ws: ${lan}`);
+  }
+  // 172.32 is outside the private block, and a name that merely looks local is not one.
+  for (const pub of ["172.32.0.1:8787", "example.com", "192.168.evil.com"]) {
+    assert.equal(parseLink(`7-tandem-verdict@${pub}`).relay, `wss://${pub}`, `not wss: ${pub}`);
+  }
+});

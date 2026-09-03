@@ -194,14 +194,13 @@ dependencies, so the plugin is just files that run.
 One of you hosts the relay:
 
 ```bash
-seshi serve          # starts a relay and a tunnel, prints the address
-seshi use wss://…    # in another terminal, point yourself at it
+seshi serve          # starts a relay and a tunnel, and points you at it
 ```
 
 Then start a conversation:
 
 ```bash
-seshi start dave decide "should our 2d-to-3d handoff be OBJ or glTF"
+seshi start "should our 2d-to-3d handoff be OBJ or glTF"
 ```
 
 It prints **one line** carrying the pairing code and the relay together. Send it. They run:

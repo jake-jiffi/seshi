@@ -77,14 +77,14 @@ export function displayName(): string {
  */
 export const NO_RELAY_HELP = `No relay set.
 
-One of you runs it, once, and shares the address:
+One of you runs it, once, and leaves it running:
 
     seshi serve
 
-That prints a wss:// address and the exact line to send the other person.
-They run:
+That points you at it and prints the address. The other person needs nothing:
+the link you send them carries it. To use a relay nobody sent you a link for:
 
-    seshi use wss://<the address they sent you>
+    seshi use wss://<address>
 
 The relay only ever sees encrypted frames and two fingerprints. It cannot read
 a word of what you say.`;

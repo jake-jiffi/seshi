@@ -4,8 +4,8 @@
  *
  * Two commands carry the whole product:
  *
- *   seshi start dave decide "the thing"   -> spins everything up, prints one link
- *   seshi join <link> "my angle"          -> one paste, and you are talking
+ *   seshi start "the thing"       -> prints one link to send
+ *   seshi join <link> "my angle"  -> one paste, and you are talking
  *
  * Everything else is inspection. The CLI holds no logic of its own; it opens a
  * SeshiNode, calls one method, and prints.
@@ -21,15 +21,15 @@ import { formatLink, parseLink } from "./link.ts";
 
 const USAGE = `seshi — your Claude talks to their Claude
 
-  seshi start <name> <mode> "<objective>"
+  seshi start "<what you want to settle>" [--mode teach|decide|build|review]
         Start a conversation. Prints the single line you send the other person.
-        Modes: teach | decide | build | review
+        Mode defaults to decide.
 
-  seshi join <link> "<your objective>"
+  seshi join <link> "<what you want out of it>"
         The other side. One paste, and you are talking.
 
-  seshi serve                 run a relay and print its address
-  seshi use <wss://...>       point at someone else's relay
+  seshi serve                 run a relay, and point yourself at it
+  seshi use <wss://...>       point at someone else's relay instead
   seshi contacts              who you are paired with
   seshi trust <name> <1|2|3>  set what a contact's agent may do
   seshi convos                conversations on this machine
@@ -182,13 +182,20 @@ async function main(argv: string[]): Promise<number> {
       }
 
       case "start": {
-        const [who, mode] = args;
-        const objective = args.slice(2).join(" ");
-        if (who === undefined || mode === undefined || objective === "") {
-          throw new Error('usage: seshi start <name> <teach|decide|build|review> "<objective>"');
+        // The name is gone on purpose: you do not know what to call someone
+        // before you have met them, and the fingerprint is the identity anyway.
+        // The label comes off their invite at pairing time.
+        const flag = args.indexOf("--mode");
+        const mode = flag === -1 ? "decide" : (args[flag + 1] ?? "");
+        const rest = flag === -1 ? args : [...args.slice(0, flag), ...args.slice(flag + 2)];
+        const objective = rest.join(" ").trim();
+        if (objective === "") {
+          throw new Error(
+            'usage: seshi start "<what you want to settle>" [--mode teach|decide|build|review]',
+          );
         }
         if (!MODES.includes(mode)) throw new Error(`mode must be one of: ${MODES.join(", ")}`);
-        return await start(node, relay, who, mode, objective);
+        return await start(node, relay, mode, objective);
       }
 
       default:
@@ -200,40 +207,28 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-/** Pair if we have to, confirm the words, then open the conversation. */
+/** Publish an invite, confirm the words when someone takes it, then talk. */
 async function start(
   node: SeshiNode,
   relay: string,
-  who: string,
   mode: string,
   objective: string,
 ): Promise<number> {
-  let contact = node.storage.listContacts().find((c) => c.name === who) ?? null;
+  const pending = await node.invite();
+  out("\n");
+  rule();
+  out(`  Send this line to the person you want to talk to. It is not a secret.\n\n`);
+  out(`      seshi join ${formatLink(pending.code, relay)} "<what you want out of it>"\n\n`);
+  rule();
+  out(`\n  waiting for them to join...\n`);
 
-  if (contact === null) {
-    const pending = await node.invite(who);
-    out("\n");
-    rule();
-    out(`  Send ${who} this line. It is not a secret.\n\n`);
-    out(`      /seshi join ${formatLink(pending.code, relay)}\n\n`);
-    rule();
-    out(`\n  waiting for ${who} to join...\n`);
-
-    const paired = await pending.waitForPeer();
-    if (!(await confirmWords(paired.safetyWords, paired.contact.name))) return 1;
-    node.verify(paired.contact.fingerprint);
-    node.storage.putContact({ ...node.contact(paired.contact.fingerprint), tier: 2 });
-    contact = node.contact(paired.contact.fingerprint);
-  }
-
-  if (contact.verifiedAt === null || contact.tier < 2) {
-    const unverified = contact.verifiedAt === null ? " and unverified" : "";
-    process.stderr.write(
-      `${contact.name} is tier ${contact.tier}${unverified}.\n` +
-        `Compare safety words, then: seshi trust ${contact.name} 2\n`,
-    );
-    return 1;
-  }
+  const paired = await pending.waitForPeer();
+  if (!(await confirmWords(paired.safetyWords, paired.contact.name))) return 1;
+  node.verify(paired.contact.fingerprint);
+  // Re-pairing someone you already trust at 3 must not quietly demote them to 2.
+  const known = node.contact(paired.contact.fingerprint);
+  node.storage.putContact({ ...known, tier: known.tier > 2 ? known.tier : 2 });
+  const contact = node.contact(paired.contact.fingerprint);
 
   const convo = node.startConvo({ peer: contact.fingerprint, mode, brief: briefFrom(objective) });
   const side = new Conversation({
@@ -328,31 +323,52 @@ async function runLoop(
     process.exit(0);
   });
 
-  for (let i = 0; i < turns; i += 1) {
-    let inbound;
-    try {
-      inbound = await node.waitForTurn({ timeoutMs: 600_000 });
-    } catch {
-      out(`\n  ${peerName} went quiet. Writing what we have.\n`);
-      break;
-    }
-    print(peerName, inbound.envelope);
-    const found = side.observe(inbound.envelope);
+  // Frames the daemon refused: a replay, a gap, a stranger. None of these were
+  // ever shown before, so a dropped turn looked exactly like a slow peer.
+  let shown = 0;
+  const showRejects = (): void => {
+    if (node.rejects.length < shown) shown = 0; // the list is capped and was trimmed
+    for (const r of node.rejects.slice(shown)) out(`  ! dropped a frame: ${r.reason}\n`);
+    shown = node.rejects.length;
+  };
 
-    for (const d of found) {
-      out(`  ! ${d.kind}: ${d.because}\n`);
-      if (d.kind === "agreement" || d.kind === "deadlock") {
-        side.writeDecision(found);
-        out(`\n  ${d.kind}. read it with:  seshi decision ${convoId}\n`);
-        stop();
-        return 0;
+  try {
+    for (let i = 0; i < turns; i += 1) {
+      let inbound;
+      try {
+        inbound = await node.waitForTurn({ timeoutMs: 600_000 });
+      } catch {
+        showRejects();
+        out(`\n  ${peerName} went quiet. Writing what we have.\n`);
+        break;
       }
-    }
+      showRejects();
+      print(peerName, inbound.envelope);
+      const found = side.observe(inbound.envelope);
 
-    const reply = await side.replyTo(inbound.envelope);
-    print("you", reply);
-    await node.send(convoId, reply);
-    if (reply.act === "CLOSE") break;
+      for (const d of found) {
+        out(`  ! ${d.kind}: ${d.because}\n`);
+        if (d.kind === "agreement" || d.kind === "deadlock") {
+          side.writeDecision(found);
+          out(`\n  ${d.kind}. read it with:  seshi decision ${convoId}\n`);
+          stop();
+          return 0;
+        }
+      }
+
+      const reply = await side.replyTo(inbound.envelope);
+      print("you", reply);
+      await node.send(convoId, reply);
+      if (reply.act === "CLOSE") break;
+    }
+  } catch (err) {
+    // A send that could not reach the relay, or an agent that died mid-turn.
+    // The artefact is written first, because a conversation that ends in a
+    // stack trace and no DECISION.md is the one outcome worse than a bad one.
+    out(`\n  something broke mid-conversation. Writing what we have.\n`);
+    side.writeDecision(side.detections());
+    stop();
+    throw err;
   }
 
   side.writeDecision(side.detections());

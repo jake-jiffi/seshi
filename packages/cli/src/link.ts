@@ -53,8 +53,18 @@ export function parseLink(input: string): SeshiLink {
     throw new Error(`that link's address looks wrong: ${host}`);
   }
 
-  // Localhost is the only place a plain ws:// is reasonable. Everything else
-  // gets TLS, because the relay is a stranger's box as far as anyone knows.
-  const local = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(host);
+  // Plain ws:// is allowed to your own machine and to a private network, and
+  // nowhere else. Two people at one desk should not have to route through a
+  // stranger's tunnel to talk, and a public host is always a stranger's box.
+  //
+  // What that costs on a shared wifi: anyone sniffing sees two routing
+  // fingerprints, frame sizes and timing. They never see content. Frames are
+  // sealed end to end and the relay is handed ciphertext either way.
+  const bare = host.replace(/:\d+$/, "");
+  const local =
+    /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(bare) ||
+    /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(bare) ||
+    /^192\.168\.\d{1,3}\.\d{1,3}$/.test(bare) ||
+    /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(bare);
   return { code, relay: `${local ? "ws" : "wss"}://${host}` };
 }

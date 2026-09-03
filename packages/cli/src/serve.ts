@@ -12,6 +12,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { writeConfig } from "./config.ts";
 
 type Tunnel = { url: string; child: ChildProcess; tool: string };
 
@@ -28,6 +29,27 @@ const TUNNELS = [
     match: /https:\/\/[a-z0-9-]+\.ngrok[a-z.-]*\.app/,
   },
 ] as const;
+
+/**
+ * A quick tunnel prints a hostname before Cloudflare has finished publishing
+ * it, and sometimes prints one that never comes up at all while the
+ * cloudflared process sits there looking healthy. Handing that address to
+ * someone costs them a failed join and tells them nothing, so prove it answers
+ * before we call it live.
+ */
+async function reachable(wsUrl: string, tries = 6, gapMs = 4_000): Promise<boolean> {
+  const url = wsUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
+  for (let i = 0; i < tries; i++) {
+    try {
+      await fetch(url, { signal: AbortSignal.timeout(5_000) });
+      return true;
+    } catch {
+      // Resolves to nothing yet. Give it a moment.
+    }
+    if (i < tries - 1) await new Promise((r) => setTimeout(r, gapMs));
+  }
+  return false;
+}
 
 function have(tool: string): Promise<boolean> {
   // No shell. Passing args through a shell concatenates rather than escapes
@@ -101,15 +123,27 @@ export async function serve(port: number): Promise<number> {
         `  Or put the relay on a host you own and point both sides at it.\n`,
     );
   } else {
-    process.stdout.write(`  tunnelled with ${tunnel.tool}\n`);
+    process.stdout.write(`  tunnelled with ${tunnel.tool}, checking it answers...\n`);
+    if (await reachable(address)) {
+      process.stdout.write(`  reachable\n`);
+    } else {
+      process.stdout.write(
+        `\n  That tunnel is not answering, so the address below is dead and\n` +
+          `  nobody can join through it. Ctrl-C and run seshi serve again.\n`,
+      );
+    }
   }
+
+  // Hosting a relay and then being told to point yourself at it by hand was
+  // pure ceremony, and the other person never needed it at all: the join link
+  // carries the address.
+  writeConfig({ relay: address });
 
   process.stdout.write(
     `\n  ${"─".repeat(66)}\n` +
-      `  Send this to the person you want to talk to:\n\n` +
-      `      seshi use ${address}\n\n` +
-      `  And run it yourself, in another terminal:\n\n` +
-      `      seshi use ${address}\n` +
+      `  Relay live at ${address}\n` +
+      `  Already set as yours. Start talking, in another terminal:\n\n` +
+      `      seshi start "what you want to settle"\n` +
       `  ${"─".repeat(66)}\n\n` +
       `  This relay forwards encrypted frames between two paired people and\n` +
       `  queues them when one side is offline. It sees ciphertext and two\n` +
