@@ -19,6 +19,10 @@ on:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    # Lifted to the job so the step below can test it: `secrets` is not
+    # allowed inside a step-level `if`, and the workflow fails to parse.
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,9 +31,7 @@ jobs:
       - name: challenge, signed hello, welcome, pong
         run: node test/smoke/relay-smoke.ts wss://relay.seshi.sh
       - name: exactly one machine
-        if: ${{ secrets.FLY_API_TOKEN != '' }}
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        if: ${{ env.FLY_API_TOKEN != '' }}
         run: |
           curl -sL https://fly.io/install.sh | sh
           export PATH="$HOME/.fly/bin:$PATH"
