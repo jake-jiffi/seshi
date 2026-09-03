@@ -38,6 +38,13 @@ export const ACTS = [
   "RED_TEAM",
   "PROPOSE_FINAL",
   "CLOSE",
+  /**
+   * A human cutting in, live, relayed by their own daemon. The words are the
+   * person's, not their agent's, and the receiving daemon frames them that
+   * way. Still another machine's bytes, so still escaped on the way in. The
+   * detectors ignore HUMAN turns: a person steering is not an agent folding.
+   */
+  "HUMAN",
 ] as const;
 
 export type Act = (typeof ACTS)[number];

@@ -18,9 +18,8 @@ Three things must be true, and each fails differently later if you skip it now: 
 Node is 24 or newer, and `authMethod` is not an API key. seshi refuses to run an agent on an API
 key, so say that plainly rather than letting it fail three steps in.
 
-If `"$SESHI" whoami` says no relay is set, run `"$SESHI" use wss://relay.seshi.sh` and tell them in
-one line whose box that is: Jiffi runs it, it sees two routing fingerprints and ciphertext, it
-never sees content, and `seshi use` points somewhere else if they would rather.
+There is no relay to set. The CLI ships pointed at `wss://relay.seshi.sh` and says whose box that
+is the first time it runs. If they would rather use their own, `"$SESHI" use wss://<host>`.
 
 ## 2. Get the objective, and pick the mode yourself
 
@@ -94,14 +93,29 @@ kill "$(cat /tmp/seshi-$ID.holder)" 2>/dev/null
 Then tell them to delete `~/.seshi/contacts/<fingerprint>` and start again with a fresh code, and
 say plainly that those four words are the only thing standing between them and a man in the middle.
 
-## 6. While it runs
+## 6. While it runs: relay, and offer the lever at the right moments
 
 Relay each turn as it lands with a short plain line under it saying what just happened. Never
 invent a turn, a code, a fingerprint or a safety word: they come from the log or they do not exist.
 
-Their agent is arguing for them. If it concedes something that matters, say so out loud rather than
-reporting a smooth consensus. If they want to steer, take what they say and pass it in as an
-interjection to both sides.
+Their agent is arguing for them, and they can cut in at any time with `/seshi:say`. Their words go
+to both sides as them, not as the agent. Do not mention it on every turn; offer it when it would
+change something, and say why in one line:
+
+| You see | Say, then offer |
+|---|---|
+| Their own agent sends `CONCEDE` or `ACCEPT` on something from their brief | "Your agent just gave up X. Want to overrule it?" |
+| Their agent's `RED_TEAM` names a concession | Read the concession back. "Happy with that trade, or want to hold the line?" |
+| `! deadlock` or an issue goes `escalated` | "This one is yours to settle. What do you want to tell them both?" |
+| `! looping` | "They are going round in circles. Want to narrow it?" |
+| `! degenerate` | Say plainly which side folded. If it was theirs: "Want to push back?" |
+| The other person's `HUMAN` turn | Read it to them as that person's words. "They just cut in. Want to answer them directly?" |
+| Two `NOT_UNDERSTOOD` in a row | "The agents are talking past each other. A sentence from you would reset it." |
+| The log has been quiet for a few minutes | Say so, say it is probably a model turn, and that a `say` would nudge it. |
+
+If they give you words, send them exactly as given. Never say anything on their behalf that they
+did not type, and never send a `say` because you think the conversation needs one. The lever is
+theirs.
 
 ## 7. When it closes
 

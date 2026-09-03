@@ -160,7 +160,12 @@ function detectDegenerate(input: DetectInput, parties: string[]): Detection[] {
   const mode = input.mode ?? "decide";
   const capitulationApplies = mode === "decide" || mode === "build";
   for (const party of capitulationApplies ? parties : []) {
-    const turns = input.history.filter((e) => e.from === party && e.act !== "BRIEF");
+    // HUMAN turns are the person cutting in, not the agent's own moves. They
+    // must not dilute the rate: three folds plus three interjections is still
+    // an agent that folded every time it spoke.
+    const turns = input.history.filter(
+      (e) => e.from === party && e.act !== "BRIEF" && e.act !== "HUMAN",
+    );
     if (turns.length < 3) continue;
     const folds = turns.filter((e) => CAPITULATION_ACTS.includes(e.act)).length;
     const rate = folds / turns.length;
@@ -254,7 +259,8 @@ function detectDeadlock(input: DetectInput, parties: string[]): Detection | null
   // DEADLOCK_REPEATS + 1 turns of real exchange, not one agent talking twice.
   const rounds = Math.min(
     ...stuck.map(
-      (p) => input.history.filter((e) => e.from === p && e.act !== "BRIEF").length,
+      (p) =>
+        input.history.filter((e) => e.from === p && e.act !== "BRIEF" && e.act !== "HUMAN").length,
     ),
   );
   if (rounds < DEADLOCK_REPEATS + 1) return null;

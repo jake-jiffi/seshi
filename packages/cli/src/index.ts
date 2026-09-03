@@ -14,9 +14,20 @@
 import { createInterface } from "node:readline/promises";
 import { SeshiNode } from "../../daemon/src/node.ts";
 import { Conversation } from "../../daemon/src/conversation.ts";
-import type { PublicBrief } from "../../daemon/src/storage.ts";
+import { startDaemon, type Daemon } from "../../daemon/src/daemon.ts";
+import { controlRequest } from "../../daemon/src/control.ts";
+import { Storage, type PublicBrief } from "../../daemon/src/storage.ts";
 import type { Envelope } from "../../core/src/envelope.ts";
-import { displayName, NO_RELAY_HELP, relayUrl, seshiHome, writeConfig } from "./config.ts";
+import { escapePeerText, PEER_TAG } from "../../core/src/escape.ts";
+import { watch } from "./watch.ts";
+import {
+  adoptDefaultRelay,
+  DEFAULT_RELAY_NOTE,
+  displayName,
+  relayUrl,
+  seshiHome,
+  writeConfig,
+} from "./config.ts";
 import { formatLink, parseLink } from "./link.ts";
 
 const USAGE = `seshi — your Claude talks to their Claude
@@ -28,12 +39,14 @@ const USAGE = `seshi — your Claude talks to their Claude
   seshi join <link> "<what you want out of it>"
         The other side. One paste, and you are talking.
 
-  seshi serve                 run a relay, and point yourself at it
-  seshi use <wss://...>       point at someone else's relay instead
+  seshi use <wss://...>       use a relay of your own instead of relay.seshi.sh
+  seshi serve                 run a relay here, and point yourself at it
   seshi contacts              who you are paired with
   seshi trust <name> <1|2|3>  set what a contact's agent may do
   seshi convos                conversations on this machine
   seshi decision <id>         read what a conversation produced
+  seshi say "<words>"         cut in on the running conversation; both sides hear it
+  seshi watch                 stream this machine's conversations, one line per event
   seshi whoami                this machine's identity
 
 Node 24+. No npm install, no API key. Each side thinks on its own subscription.
@@ -100,6 +113,35 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  // `watch` and `say` talk to the process running a conversation, over the
+  // control socket, so they open no relay connection of their own.
+  if (cmd === "watch") return await watch(seshiHome());
+
+  if (cmd === "say") {
+    // A uuid first names a specific conversation; otherwise the running one.
+    const [first, ...more] = args;
+    const isId = first !== undefined && /^[0-9a-f-]{36}$/i.test(first);
+    const text = (isId ? more : args).join(" ").trim();
+    if (text === "") throw new Error('usage: seshi say [convo-id] "<what you want to say>"');
+    const storage = Storage.open(seshiHome());
+    try {
+      await controlRequest(storage.controlSocketPath(), storage.controlKey(), "say", {
+        ...(isId ? { convo: first } : {}),
+        text,
+      });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ECONNREFUSED") {
+        throw new Error(
+          "nothing is running here. Start or join a conversation first, then say it again.",
+        );
+      }
+      throw err;
+    }
+    out(`  said, to both sides: ${text}\n`);
+    return 0;
+  }
+
   // `join` carries its own relay inside the link, so it runs before the relay
   // check that every other command needs.
   if (cmd === "join") {
@@ -108,11 +150,8 @@ async function main(argv: string[]): Promise<number> {
     return await join(link, args.slice(1).join(" "));
   }
 
+  if (adoptDefaultRelay()) out(`\n${DEFAULT_RELAY_NOTE}\n`);
   const relay = relayUrl();
-  if (relay === null) {
-    process.stderr.write(`${NO_RELAY_HELP}\n`);
-    return 1;
-  }
 
   const node = await SeshiNode.open({ home: seshiHome(), relayUrl: relay, name: displayName() });
   const holdOpen = cmd === "start";
@@ -239,15 +278,68 @@ async function start(
     ...(contact.tier === 3 ? { repo: process.cwd() } : {}),
   });
 
+  const daemon = await attachControl(node, side, convo.id);
   out(`\n  ${mode} with ${contact.name}\n  ${objective}\n\n  starting your agent...\n`);
   await side.open();
 
   const opening = await side.openingTurn();
   print("you", opening);
   await node.send(convo.id, opening);
+  daemon.broadcast(turnEvent(convo.id, "you", opening));
 
-  return await runLoop(node, side, contact.name, convo.id, convo.budget.turns);
+  return await runLoop(node, side, daemon, contact, convo.id, convo.budget.turns);
 }
+
+/**
+ * The control socket, hosted by the process running the conversation.
+ *
+ * `seshi say` and `seshi watch` in other terminals, and the Claude Code hook's
+ * Monitor, all talk to this. A `say` goes to both sides: into our own agent's
+ * next prompt, and over the wire as a HUMAN envelope that the peer's daemon
+ * frames as the other person speaking.
+ */
+async function attachControl(node: SeshiNode, side: Conversation, convoId: string): Promise<Daemon> {
+  try {
+    return await startDaemon({
+      home: seshiHome(),
+      idleTimeoutMs: 0,
+      current: () => convoId,
+      onSay: async (convo, text) => {
+        if (convo !== convoId) {
+          throw new Error(`the running conversation is ${convoId}, not ${convo}`);
+        }
+        side.interject(text);
+        const e = await node.send(convoId, {
+          seq: 0,
+          prev: null,
+          act: "HUMAN",
+          headline: text.slice(0, 200),
+          body: text.slice(0, 1200),
+        });
+        print("you (human)", e);
+      },
+    });
+  } catch (err) {
+    if (/already running/.test((err as Error).message)) {
+      throw new Error(
+        "another conversation is running on this machine. Finish it, then start this one.",
+      );
+    }
+    throw err;
+  }
+}
+
+/** One event for the watchers. Peer headlines are escaped and tagged as data. */
+function turnEvent(convo: string, from: string, e: Envelope): Record<string, unknown> {
+  const headline =
+    from === "you"
+      ? e.headline
+      : `<${PEER_TAG} from="${from}">${escapePeerText(e.headline)}</${PEER_TAG}>`;
+  return { kind: "turn", at: new Date().toISOString(), convo, from, act: e.act, headline };
+}
+
+/** How long a peer may stay silent before the watchers are told. */
+const QUIET_AFTER_MS = 180_000;
 
 /** One paste: sets the relay, pairs, confirms, and waits for their opening. */
 async function join(link: string, objective: string): Promise<number> {
@@ -291,34 +383,46 @@ async function join(link: string, objective: string): Promise<number> {
     scopedDir: node.storage.convoDir(convo.id),
     ...(contact.tier === 3 ? { repo: process.cwd() } : {}),
   });
+  const daemon = await attachControl(node, side, convo.id);
   out(`  ${convo.mode} with ${contact.name}\n  starting your agent...\n`);
   await side.open();
 
   print(contact.name, first.envelope);
+  daemon.broadcast(turnEvent(convo.id, contact.fingerprint.slice(0, 16), first.envelope));
   side.observe(first.envelope);
   const reply = await side.replyTo(first.envelope);
   print("you", reply);
   await node.send(convo.id, reply);
+  daemon.broadcast(turnEvent(convo.id, "you", reply));
 
-  return await runLoop(node, side, contact.name, convo.id, convo.budget.turns);
+  return await runLoop(node, side, daemon, contact, convo.id, convo.budget.turns);
 }
 
 /** The half both sides share: read a turn, report detectors, answer, repeat. */
 async function runLoop(
   node: SeshiNode,
   side: Conversation,
-  peerName: string,
+  daemon: Daemon,
+  peer: { name: string; fingerprint: string },
   convoId: string,
   turns: number,
 ): Promise<number> {
+  const peerName = peer.name;
+  const peerFrom = peer.fingerprint.slice(0, 16);
+  const at = (): string => new Date().toISOString();
+  const close = (because: string): void => {
+    daemon.broadcast({ kind: "closed", at: at(), convo: convoId, because });
+  };
   const stop = (): void => {
     side.discardWorktree();
     side.stop();
     node.close();
+    void daemon.stop();
   };
   process.on("SIGINT", () => {
     out("\n  interrupted. writing what we have.\n");
     side.writeDecision(side.detections());
+    close("interrupted at the keyboard");
     stop();
     process.exit(0);
   });
@@ -328,29 +432,52 @@ async function runLoop(
   let shown = 0;
   const showRejects = (): void => {
     if (node.rejects.length < shown) shown = 0; // the list is capped and was trimmed
-    for (const r of node.rejects.slice(shown)) out(`  ! dropped a frame: ${r.reason}\n`);
+    for (const r of node.rejects.slice(shown)) {
+      out(`  ! dropped a frame: ${r.reason}\n`);
+      daemon.broadcast({ kind: "dropped", at: at(), convo: convoId, reason: r.reason });
+    }
     shown = node.rejects.length;
   };
 
   try {
     for (let i = 0; i < turns; i += 1) {
+      // A silent wait and a broken wait must never look the same. The
+      // watchers hear about a long silence before the wait gives up.
+      const quiet = setTimeout(() => {
+        daemon.broadcast({
+          kind: "quiet",
+          at: at(),
+          convo: convoId,
+          because: `${peerName} has not sent a turn for ${QUIET_AFTER_MS / 60_000} minutes; ` +
+            `their agent may still be thinking, or they may need a nudge`,
+        });
+      }, QUIET_AFTER_MS);
+      quiet.unref();
       let inbound;
       try {
         inbound = await node.waitForTurn({ timeoutMs: 600_000 });
       } catch {
+        clearTimeout(quiet);
         showRejects();
         out(`\n  ${peerName} went quiet. Writing what we have.\n`);
+        close(`${peerName} went quiet`);
         break;
       }
+      clearTimeout(quiet);
       showRejects();
       print(peerName, inbound.envelope);
+      daemon.broadcast(turnEvent(convoId, peerFrom, inbound.envelope));
       const found = side.observe(inbound.envelope);
 
       for (const d of found) {
         out(`  ! ${d.kind}: ${d.because}\n`);
+        daemon.broadcast({
+          kind: "detector", at: at(), convo: convoId, detector: d.kind, because: d.because,
+        });
         if (d.kind === "agreement" || d.kind === "deadlock") {
           side.writeDecision(found);
           out(`\n  ${d.kind}. read it with:  seshi decision ${convoId}\n`);
+          close(d.kind);
           stop();
           return 0;
         }
@@ -359,7 +486,11 @@ async function runLoop(
       const reply = await side.replyTo(inbound.envelope);
       print("you", reply);
       await node.send(convoId, reply);
-      if (reply.act === "CLOSE") break;
+      daemon.broadcast(turnEvent(convoId, "you", reply));
+      if (reply.act === "CLOSE") {
+        close("closed by both sides");
+        break;
+      }
     }
   } catch (err) {
     // A send that could not reach the relay, or an agent that died mid-turn.
@@ -367,6 +498,7 @@ async function runLoop(
     // stack trace and no DECISION.md is the one outcome worse than a bad one.
     out(`\n  something broke mid-conversation. Writing what we have.\n`);
     side.writeDecision(side.detections());
+    close(`broke mid-conversation: ${(err as Error).message}`);
     stop();
     throw err;
   }

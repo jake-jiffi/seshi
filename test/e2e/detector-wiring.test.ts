@@ -43,10 +43,14 @@ process.on("exit", () => {
  * per turn. It mimics the one measured behaviour that matters: the init event
  * is emitted at the start of a TURN, not at startup.
  */
+/** Where the fake writes every prompt it is handed. Read by human-in-the-loop.test.ts's twin. */
+let promptLog = "";
+
 function fakeClaude(replies: string[]): string {
   const dir = tmp("bin");
   const queue = join(dir, "queue.json");
   const argvLog = join(dir, "argv.json");
+  promptLog = join(dir, "prompts.jsonl");
   writeFileSync(queue, JSON.stringify(replies));
   const script = `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -59,7 +63,8 @@ process.stdin.on("data", (chunk) => {
   buf += chunk;
   let nl;
   while ((nl = buf.indexOf("\\n")) >= 0) {
-    buf.slice(0, nl); buf = buf.slice(nl + 1);
+    fs.appendFileSync(${JSON.stringify(promptLog)}, buf.slice(0, nl) + "\\n");
+    buf = buf.slice(nl + 1);
     if (!init) {
       init = true;
       process.stdout.write(JSON.stringify({

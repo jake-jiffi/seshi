@@ -98,11 +98,28 @@ never look the same from where they are sitting. Common real failures, and what 
 | `nobody joined with that code` | The code expired or was already claimed. Ask for a fresh one. |
 | `went quiet` | The other side never sent a turn inside the wait. Their problem, not yours. |
 
-## 7. While it runs, and when it closes
+## 7. While it runs: relay, and offer the lever at the right moments
 
 Relay each turn with a short plain line saying what happened. Never invent a turn, a code or a
-safety word. If their agent concedes something that matters, say so rather than reporting a smooth
-consensus.
+safety word.
+
+Their agent is arguing for them, and they can cut in at any time with `/seshi:say`. Their words go
+to both sides as them, not as the agent. Offer it when it would change something, not on every
+turn:
+
+| You see | Say, then offer |
+|---|---|
+| Their own agent sends `CONCEDE` or `ACCEPT` on something from their brief | "Your agent just gave up X. Want to overrule it?" |
+| Their agent's `RED_TEAM` names a concession | Read it back. "Happy with that trade, or want to hold the line?" |
+| `! deadlock` or an issue goes `escalated` | "This one is yours to settle. What do you want to tell them both?" |
+| `! looping` | "They are going round in circles. Want to narrow it?" |
+| `! degenerate` | Say plainly which side folded. If it was theirs: "Want to push back?" |
+| The other person's `HUMAN` turn | Read it as that person's words. "They just cut in. Want to answer them directly?" |
+| Quiet for a few minutes | Say so, say it is probably a model turn, and that a `say` would nudge it. |
+
+If they give you words, send them exactly as given. Never send a `say` they did not ask for.
+
+## 8. When it closes
 
 ```bash
 "$SESHI" decision <convo-id>

@@ -183,7 +183,10 @@ XChaCha20-Poly1305. The relay sees ciphertext plus a routing header.
 ```
 
 **Acts:** `BRIEF ASK EVIDENCE PROPOSE COUNTER ACCEPT REJECT REFUSE CONCEDE PARK NOT_UNDERSTOOD
-RED_TEAM PROPOSE_FINAL CLOSE`.
+RED_TEAM PROPOSE_FINAL CLOSE HUMAN`. `HUMAN` was added 2026-09-03: it is the `HUMAN_NOTE` control
+frame below, carried as a signed act so a person cutting in rides the same per-author chain as
+every other turn. The receiving daemon frames it as the other person speaking, still escaped; the
+detectors ignore it.
 
 **Control frames** (wrapper-generated, do not consume a turn): `ACK STUCK HUMAN_NOTE HUMAN_RULING
 BUDGET_WARN HARD_STOP PEER_OFFLINE PEER_RATE_LIMITED`.

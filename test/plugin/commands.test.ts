@@ -61,7 +61,7 @@ test("no instruction file names a command the CLI does not have", () => {
 });
 
 test("the slash commands exist and carry front matter", () => {
-  for (const name of ["start", "join"]) {
+  for (const name of ["start", "join", "say"]) {
     const path = join(root, "commands", `${name}.md`);
     assert.ok(existsSync(path), `missing commands/${name}.md, so /seshi:${name} does not exist`);
     const text = readFileSync(path, "utf8");
@@ -74,7 +74,7 @@ test("the slash commands exist and carry front matter", () => {
 test("neither slash command reaches for --yes", () => {
   // --yes skips the safety-word prompt, which is the only defence against a
   // man in the middle. The commands hold stdin open on a pipe instead.
-  for (const name of ["start", "join"]) {
+  for (const name of ["start", "join", "say"]) {
     const text = readFileSync(join(root, "commands", `${name}.md`), "utf8");
     const runs = [...text.matchAll(/"\$SESHI"\s+[a-z-]+[^\n]*/g)].map((m) => m[0]);
     for (const line of runs) {

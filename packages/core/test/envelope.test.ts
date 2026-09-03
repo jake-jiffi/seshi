@@ -245,11 +245,13 @@ test("open rejects an unknown act arriving from a peer", () => {
   assert.throws(() => openEnvelope(wire, b, a.sign.pub, a.seal.pub), /act/i);
 });
 
-test("ACTS carries exactly the fourteen acts in the spec", () => {
-  assert.equal(ACTS.length, 14);
+test("ACTS carries exactly the fourteen acts in the spec, plus HUMAN", () => {
+  // HUMAN is the spec's HUMAN_NOTE control frame carried as a signed act, so
+  // a person cutting in rides the same chain as everything else.
+  assert.equal(ACTS.length, 15);
   assert.deepEqual([...ACTS].sort(), [
     "ACCEPT", "ASK", "BRIEF", "CLOSE", "CONCEDE", "COUNTER", "EVIDENCE",
-    "NOT_UNDERSTOOD", "PARK", "PROPOSE", "PROPOSE_FINAL", "RED_TEAM",
+    "HUMAN", "NOT_UNDERSTOOD", "PARK", "PROPOSE", "PROPOSE_FINAL", "RED_TEAM",
     "REFUSE", "REJECT",
   ].sort());
 });

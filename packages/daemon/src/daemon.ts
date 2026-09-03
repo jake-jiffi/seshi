@@ -29,6 +29,12 @@ export type DaemonOptions = {
    * still a real local record and a real event to every watcher.
    */
   onSay?: (convo: string, text: string) => void | Promise<void>;
+  /**
+   * The conversation this process is running, so `say` needs no id. The
+   * control socket belongs to exactly one running process, and that process
+   * knows which conversation it holds.
+   */
+  current?: () => string | null;
 };
 
 export type Daemon = {
@@ -92,7 +98,12 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
      * cut did it.
      */
     say: async (args) => {
-      const convo = requireString(args, "convo");
+      const named = args["convo"];
+      const convo =
+        typeof named === "string" && named !== "" ? named : (opts.current?.() ?? null);
+      if (convo === null) {
+        throw new Error("no conversation is running here; pass a conversation id");
+      }
       const text = requireString(args, "text");
       if (storage.getConvo(convo) === null) throw new Error(`unknown conversation: ${convo}`);
 
