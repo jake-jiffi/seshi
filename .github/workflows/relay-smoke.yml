@@ -1,0 +1,40 @@
+# The public relay, checked from outside every half hour and on every change
+# to it: full handshake plus a ping, and exactly one machine on Fly. Two
+# machines would split the in-memory mailboxes and queues silently, and the
+# first deploy created two by default.
+name: relay smoke
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "packages/relay/**"
+      - "fly.toml"
+      - "Dockerfile"
+      - "test/smoke/**"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: challenge, signed hello, welcome, pong
+        run: node test/smoke/relay-smoke.ts wss://relay.seshi.sh
+      - name: exactly one machine
+        if: ${{ secrets.FLY_API_TOKEN != '' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          curl -sL https://fly.io/install.sh | sh
+          export PATH="$HOME/.fly/bin:$PATH"
+          started=$(flyctl machines list -a seshi-relay --json | node -e '
+            let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+              console.log(JSON.parse(s).filter((m) => m.state === "started").length);
+            });')
+          test "$started" = "1" || { echo "expected exactly 1 started machine, found $started"; exit 1; }

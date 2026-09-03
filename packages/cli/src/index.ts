@@ -92,7 +92,7 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
   if (cmd === "--version" || cmd === "-v") {
-    out("seshi 0.2.0\n");
+    out("seshi 0.3.0\n");
     return 0;
   }
   if (cmd === "serve") {
