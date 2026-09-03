@@ -206,6 +206,57 @@ test("a reply that carries the ledger is not reminded, and neither is NOT_UNDERS
   assert.equal(prompts().length, before + 1, "a reply that did not parse is not nagged for a ledger");
 });
 
+test("a closing turn that leaves the ledger out is reminded even with nothing open, so both sides declare agreed", async (t) => {
+  // The live run: our ACCEPT declared agreed, the peer's CLOSE carried no
+  // ledger, and the artefact called a signed decision agreed by one side only.
+  const closeBare = JSON.stringify({ act: "CLOSE", headline: "done", body: "closing" });
+  const closeAgreed = JSON.stringify({ act: "CLOSE", headline: "done", body: "closing", ledger: [{ id: "i-01", state: "agreed" }] });
+  const { side, fromDave } = await twoSides(t, [
+    reply("BRIEF", { ledger: [{ id: "i-01", state: "proposed" }] }),
+    closeBare,
+    closeAgreed,
+  ]);
+  await side.openingTurn();
+  const theirs = fromDave(1, { act: "ACCEPT", headline: "signed", body: "agreed", ledger: [{ id: "i-01", state: "agreed" }] });
+  side.observe(theirs);
+  assert.equal(side.ledger.openCount(), 0, "nothing is open any more");
+  const before = prompts().length;
+  const sent = await side.replyTo(theirs);
+  assert.equal(prompts().length, before + 2, "reminded although nothing was open");
+  assert.deepEqual(sent.ledger, [{ id: "i-01", state: "agreed" }]);
+  assert.match(side.writeDecision(), /## Decision\n\n- must run without Blender/, "both sides declared agreed, so it is a decision");
+});
+
+test("a detector that fired mid-run is in the artefact even when nothing fires at the close", async (t) => {
+  // Four turns with the ledger unmoved and an issue open trips looping. Then
+  // both sides agree and looping goes quiet. The artefact keeps both facts.
+  // Distinct positions on both sides, in real words: the position fingerprint
+  // drops words under three characters, so "body 1" and "body 2" would read
+  // as one restated position and trip deadlock instead.
+  const ours = ["quads must survive the handoff", "metres rather than millimetres", "glTF cannot carry quads"];
+  const theirs = ["edge flow is the whole point", "units are negotiable", "OBJ keeps the cage"];
+  const { side, fromDave } = await twoSides(t, [
+    reply("BRIEF", { ledger: [{ id: "i-01", state: "proposed" }] }),
+    ...ours.map((body) => reply("COUNTER", { body, ledger: [{ id: "i-01", state: "proposed" }] })),
+    reply("ACCEPT", { ledger: [{ id: "i-01", state: "agreed" }] }),
+  ]);
+  await side.openingTurn();
+  let sawLooping = false;
+  for (let i = 1; i <= 3; i++) {
+    const p = fromDave(i, { act: "COUNTER", headline: `counter ${i}`, body: theirs[i - 1]!, ledger: [{ id: "i-01", state: "proposed" }] });
+    if (side.observe(p).some((d) => d.kind === "looping")) sawLooping = true;
+    await side.replyTo(p);
+  }
+  assert.ok(sawLooping, "looping should have fired while the ledger sat still");
+  const done = fromDave(4, { act: "ACCEPT", headline: "ok", body: "agreed", ledger: [{ id: "i-01", state: "agreed" }] });
+  const atClose = side.observe(done);
+  await side.replyTo(done);
+  assert.ok(!atClose.some((d) => d.kind === "looping"), "looping is quiet once nothing is open");
+  const md = side.writeDecision(side.detections());
+  assert.match(md, /_Nothing firing at the close\._/);
+  assert.match(md, /During the run:\n- \*\*looping\*\* at turn \d+: the ledger has not changed/);
+});
+
 test("`say` with no id reaches the running conversation over the control socket", async (t) => {
   const home = tmp("ctl");
   Storage.open(home).putConvo({

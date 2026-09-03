@@ -116,6 +116,8 @@ export class Conversation {
    * else, unescaped.
    */
   readonly #pendingHuman: string[] = [];
+  /** Every distinct detection over the run, with the turn it first fired on. */
+  readonly #fired = new Map<string, Detection & { turn: number }>();
 
   constructor(opts: ConversationOptions) {
     this.#node = opts.node;
@@ -301,7 +303,15 @@ export class Conversation {
     this.#applyLedgerView(inbound);
     this.#recordConcessions(inbound);
     this.#ledgerTrail.push(this.#ledger.fingerprint());
-    return this.detections();
+    const found = this.detections();
+    // Remembered for the artefact. A detector that fired at turn eight and
+    // went quiet by the close still fired, and "nothing fired" at the end
+    // was hiding two looping notices in a live run.
+    for (const d of found) {
+      const key = `${d.kind}:${d.because}`;
+      if (!this.#fired.has(key)) this.#fired.set(key, { ...d, turn: this.#history.length });
+    }
+    return found;
   }
 
   /** Run the detectors over everything seen so far. */
@@ -381,9 +391,15 @@ export class Conversation {
     // The ledger is what makes a conversation converge instead of drift, and
     // agents argue well in prose and forget it. Seven of eight clauses were
     // agreed in one live run and the artefact said no decision, because the
-    // ledger never moved. So a reply that leaves it out while issues are
-    // open gets one reminder, same act and words, before it goes on the wire.
-    if (parsed.ledger === undefined && parsed.act !== "NOT_UNDERSTOOD" && this.#ledger.openCount() > 0) {
+    // ledger never moved. So a reply that leaves it out gets one reminder,
+    // same act and words, before it goes on the wire.
+    //
+    // Whenever the ledger has issues, not only while some are open. The
+    // closing turns are where both sides have to declare `agreed`, and in a
+    // live run the peer's CLOSE went out with no ledger because its side had
+    // nothing open any more, so its last declared view stayed `proposed` and
+    // the artefact called a signed decision "agreed by one side only".
+    if (parsed.ledger === undefined && parsed.act !== "NOT_UNDERSTOOD" && this.#ledger.all().length > 0) {
       const issues = this.#ledger.all().map((i) => `  ${i.id} [${i.state}] ${i.text}`).join("\n");
       const again = await this.#agent.send(
         `Your reply left out the 'ledger' field. Send the SAME envelope again, same act, same ` +
@@ -488,9 +504,22 @@ export class Conversation {
       ``,
       `## What the detectors saw`,
       ``,
-      detections.length === 0
-        ? `_Nothing fired._`
-        : detections.map((d) => `- **${d.kind}**: ${d.because}`).join("\n"),
+      ...(detections.length === 0 && this.#fired.size === 0
+        ? [`_Nothing fired._`]
+        : [
+            ...(detections.length === 0
+              ? [`_Nothing firing at the close._`]
+              : detections.map((d) => `- **${d.kind}**: ${d.because}`)),
+            ...(this.#fired.size === 0
+              ? []
+              : [
+                  ``,
+                  `During the run:`,
+                  ...[...this.#fired.values()].map(
+                    (d) => `- **${d.kind}** at turn ${d.turn}: ${d.because}`,
+                  ),
+                ]),
+          ]),
       ``,
       ...(this.#patchSection()),
       `## Transcript`,
