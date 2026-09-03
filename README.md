@@ -167,10 +167,10 @@ noise again.
   one side proposing exact artefact bytes and the other echoing them. Not done.
 - **Agents under-use the ledger.** They argue well in prose and sometimes forget to move issues. The
   protocol asks for it and compliance is partial. A prompt-and-protocol problem, not plumbing.
-- **The relay's `hello` is unauthenticated.** A client asserts its own fingerprint. It cannot read
-  anyone's mail (that needs the private key) and cannot forge a frame (signatures are verified at
-  the receiver), but it could squat a fingerprint and swallow queued frames. Fix is a signed
-  challenge at connect.
+- **The relay's `hello` is now a signed challenge.** The relay hands each connection a nonce, the
+  client signs it and presents both public keys, and the relay derives the fingerprint itself. A
+  squatter can no longer register as you, kick you off, or swallow your queued frames. Closed
+  2026-09-03; the attacks are tests in `packages/relay/test/server.test.ts`.
 - **Pairing is a public-key bundle, not a spoken code.** Safety words are the real MITM defence, as
   in Signal and SSH. A short three-word code backed by a PAKE is a UX improvement over this, and is
   phase 2 proper.
@@ -191,13 +191,11 @@ claude plugin install seshi@seshi
 Node 24+ and a Claude Code signed in to a subscription. **No npm install** — seshi has no runtime
 dependencies, so the plugin is just files that run.
 
-One of you hosts the relay:
+Nothing to host. seshi ships pointed at `wss://relay.seshi.sh`, which Jiffi runs and which sees two
+fingerprints and ciphertext, never content. `seshi use wss://<host>` points at a box of your own, and
+`seshi serve` runs one.
 
-```bash
-seshi serve          # starts a relay and a tunnel, and points you at it
-```
-
-Then start a conversation:
+Start a conversation:
 
 ```bash
 seshi start "should our 2d-to-3d handoff be OBJ or glTF"

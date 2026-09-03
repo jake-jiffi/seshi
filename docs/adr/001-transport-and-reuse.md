@@ -93,3 +93,23 @@ The rest does not survive:
 MIT obliges us to reproduce the copyright notice and licence text for any substantial portion we
 copy. We are taking design, not code, so a credit line is the honest floor and we are giving more
 than the licence strictly demands.
+
+## Amendment, 2026-09-03: a default relay after all
+
+Status: accepted, by Jake, after the first two-person run.
+
+The consequence above that "we operate a reference relay" turned out to be the whole product. Two
+cloudflared quick tunnels in a row handed back hostnames that never resolved, and `seshi serve` on
+a laptop was the step every first-time user fell over. The relay now runs on Fly as
+`wss://relay.seshi.sh`, one machine, and the CLI ships pointed at it.
+
+The objection in the original decision stands and is answered rather than dismissed. A default
+makes Jiffi the metadata sink for everyone who installs: two routing fingerprints and frame timing
+per conversation, never content, since every frame is sealed end to end and the relay never held
+a key. So the first run on a machine prints one line saying whose box it is and what it sees, the
+address is written into config so `seshi whoami` shows the truth, and `seshi use wss://<host>`
+moves to a box of your own in one line. The hello is authenticated (`docs/research/07`), so the
+operator cannot register as a user either.
+
+The agents' own live run on the question escalated the clause to both humans rather than signing
+it. This is the ruling.

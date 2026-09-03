@@ -51,12 +51,42 @@ export function writeConfig(patch: Config): Config {
   return merged;
 }
 
-/** Env beats config, config beats nothing. There is no baked-in default. */
-export function relayUrl(): string | null {
+/**
+ * The relay seshi ships pointed at.
+ *
+ * ADR 001 refused a baked-in default because it makes one operator the
+ * metadata sink for every stranger who installs. The amendment of 2026-09-03
+ * takes that trade on purpose: Jiffi runs this box, says so on first use, and
+ * `seshi use` points anywhere else in one line. What the relay sees is two
+ * routing fingerprints and ciphertext, never content.
+ */
+export const DEFAULT_RELAY = "wss://relay.seshi.sh";
+
+/** Env beats config, config beats the default. Never null. */
+export function relayUrl(): string {
   const fromEnv = process.env["SESHI_RELAY"];
   if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
-  return readConfig().relay ?? null;
+  return readConfig().relay ?? DEFAULT_RELAY;
 }
+
+/**
+ * True the first time a machine falls back to the default: nothing in the
+ * environment and nothing in config. The caller says whose box it is, once,
+ * and writes the default into config so the next run is quiet and `whoami`
+ * shows the truth.
+ */
+export function adoptDefaultRelay(): boolean {
+  const fromEnv = process.env["SESHI_RELAY"];
+  if (fromEnv !== undefined && fromEnv !== "") return false;
+  if (readConfig().relay !== undefined) return false;
+  writeConfig({ relay: DEFAULT_RELAY });
+  return true;
+}
+
+export const DEFAULT_RELAY_NOTE = `  Using Jiffi's relay at ${DEFAULT_RELAY}.
+  It carries sealed frames between paired people. It sees two fingerprints and
+  ciphertext, never content. To use a box of your own:  seshi use wss://<host>
+`;
 
 export function displayName(): string {
   return (
@@ -66,25 +96,3 @@ export function displayName(): string {
     "someone"
   );
 }
-
-/**
- * There is deliberately no default relay baked into the source.
- *
- * A default would mean every stranger who installs this silently routes their
- * conversations through one person's machine, and that person becomes the
- * metadata sink for everyone. Whoever runs `seshi serve` chooses to carry that,
- * and says so out loud when they hand out the address.
- */
-export const NO_RELAY_HELP = `No relay set.
-
-One of you runs it, once, and leaves it running:
-
-    seshi serve
-
-That points you at it and prints the address. The other person needs nothing:
-the link you send them carries it. To use a relay nobody sent you a link for:
-
-    seshi use wss://<address>
-
-The relay only ever sees encrypted frames and two fingerprints. It cannot read
-a word of what you say.`;

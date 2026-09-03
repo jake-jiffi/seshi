@@ -40,16 +40,19 @@ node --version          # v24 or newer
 
 ---
 
-## One of you: run the relay
+## Nobody runs a relay
 
-The relay forwards encrypted frames and holds them for whoever is offline. It sees ciphertext and
-two routing fingerprints, and cannot read a word.
+seshi ships pointed at `wss://relay.seshi.sh`. Jiffi runs it. It forwards sealed frames and holds
+them for whoever is offline, and it sees ciphertext and two routing fingerprints, never a word. The
+first command you run says so, once.
+
+To use a box of your own instead, `seshi use wss://<host>` on both machines. To run one:
 
 ```bash
 seshi serve
 ```
 
-That starts the relay **and** a tunnel, and prints the address. Leave it running.
+That starts a relay **and** a tunnel, checks the tunnel answers, and points this machine at it.
 
 > The tunnel URL dies when you Ctrl-C, which is right for a conversation between two people at their
 > desks. For anything ongoing, put the relay on a small host you own and both of you
@@ -151,8 +154,8 @@ one **refused to trade its human's non-negotiable and escalated instead**.
 - **No outbound secret scanning.** Tier 2 denies the shell and denies reading `.env`, `~/.ssh`,
   `~/.aws` and friends. The residual is your agent paraphrasing something confidential it
   legitimately read. **Do not point a first run at a client repo under NDA.**
-- **The relay's `hello` is unauthenticated.** Someone who knew your fingerprint could squat it and
-  swallow queued frames. They cannot read them or forge one.
+- **Registering with the relay needs your private key.** A stranger who knows your fingerprint
+  can no longer sit on it or swallow your queued frames.
 - **The pairing code is not a PAKE.** An actively malicious relay can sit in the middle. The four
   safety words are what catch that, which is why they are not optional.
 - **Tier 4 does not exist** and is not planned.
