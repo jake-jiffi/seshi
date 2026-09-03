@@ -101,6 +101,19 @@ Both terminals then stream the conversation. Ctrl-C either side writes what it h
 seshi decision <id>     # the artefact, printed at the end
 ```
 
+## While it runs
+
+Both terminals stream the turns. You can cut in at any time, from another terminal:
+
+```bash
+seshi say "Both of you: two more turns, then close."
+```
+
+Your words go to both sides as you, not as your agent: into your agent's next prompt above
+everything else, and over the wire to the other person, whose side shows them as you speaking.
+`seshi watch` streams every event on this machine, one line each, and every Claude Code session on
+a set-up machine runs it in the background so you can ask your own session what is happening.
+
 ### The modes
 
 | Mode | Use it when |

@@ -151,44 +151,52 @@ machine is untouched. Tests: peer-only agreement is not a decision; both-sides a
 
 ## Not changed, deliberately
 
-- **Authenticated hello.** Still self-asserted, still documented. Anyone who knows a fingerprint
-  can register as it, kick the real session off, swallow its queued frames, and now also spend
-  its 64-frame sender budget. The fix is a signed challenge at connect: the relay sends a nonce,
-  the client answers with both public keys and an Ed25519 signature over `nonce ‖ fingerprint`,
-  the relay derives the fingerprint itself. About 60 lines across both sides plus tests, and a
-  protocol change to the deployed relay, so it is the first thing to do next rather than a thing
-  to slip into a review.
 - **`warnAt` in the budget** is written and never read. Spec 7.5 wants the human warned; nothing
   does. Left for the budget work.
 - **`getContact` returns unvalidated JSON.** A hand-edited `contact.json` with `tier: 9` reaches
   `tierSettings`, which throws. Harmless today; validate when contacts grow fields.
 - **Six-hour queue TTL** means a person offline longer than that loses frames. The chain records
   the gap and the human now sees it. Raise it if real use says so.
-- **The default relay** ships in the two commands as `relay.seshi.sh`. ADR 001 refuses a baked-in
-  default and has not been amended. That is Jake's ruling to make, and the agents escalated the
-  same clause to both humans in the afternoon's live run.
 
-## Speed
+## Done later the same day, on Jake's instruction
 
-Every fix above shortens something a person waits for, but honestly, the wall clock in a seshi
-conversation is the model. Two turns of `claude -p` per exchange. A cold start plus a priming turn per
-side. And the joiner's agent cannot start until the opener's first frame arrives, because the
-opener chooses the conversation id. What was measurable and safe:
+Everything the first pass left open, in the order it landed on `main`:
 
-- Keepalive removes the reconnect-and-drain path from the normal case, so a queued turn no
-  longer waits for a two-second timer plus a handshake.
-- A send no longer fails during the reconnect gap, so no conversation restarts from scratch.
-- The relay now refuses in constant work rather than parsing a flood, and the machine stays up.
+- **Authenticated hello.** The relay challenges with a nonce, the client signs it with both public
+  keys attached, the relay derives the fingerprint. Five tests attack the handshake. The residual
+  under finding 1 (spending someone else's sender budget by squatting) is closed with it.
+- **A default relay, ruled on.** ADR 001 amended: `wss://relay.seshi.sh`, disclosed once on first
+  run, `seshi use` for anyone else's box.
+- **The human cutting in.** A `HUMAN` act, `seshi say`, `seshi watch`, and the control socket
+  hosted by the running conversation. The hook's directive is runnable again. The skill and the
+  commands carry the moments to offer the lever.
+- **A ledger reminder.** A reply that omits the ledger while issues are open gets one, same act and
+  words, before it ships.
+- **Minimum Claude Code build**, checked off the init event, refused like an API key.
+- **CI.** The suite on every push. The live relay every half hour: full signed handshake, ping,
+  and exactly one machine.
 
-Candidates that need a measurement before anyone touches them:
+## Speed, measured
 
-- The joiner could pre-warm its agent while waiting for the opener, saving ten to fifteen seconds
-  per conversation, if the joiner chose the conversation id. Protocol change.
-- The full protocol preamble is resent on every turn inside one persistent session. Context grows
-  by roughly three kilobytes a turn, which slows later turns and risks compaction. Sending it
-  once might be safe, or might lose the rules on compaction. Measure first.
-- The mailbox poll opens a fresh TLS socket every two seconds for up to ten minutes. Correct by
-  design and human-speed, but it is a TLS handshake per poll through Fly.
+Two numbers on this machine, one real `claude -p` spawn:
+
+| What | Measured |
+|---|---|
+| Spawn, init event, priming turn, ready for a real turn | 5,395 ms |
+| Preamble re-sent on every turn: protocol 1,853 + mode 271 + brief ~320 + ledger ~120 | ~2,560 chars |
+
+What they say about the two candidates:
+
+- **Pre-warming the joiner's agent** would save that 5.4 seconds once per conversation, and only
+  with a protocol change so the joiner picks the conversation id. Against turns of 30 to 120
+  seconds each, that is not worth a protocol change. Leave it.
+- **Not resending the preamble** would save ~2.5 KB per turn, about 60 KB over a full 24-turn
+  conversation. Small against the turns themselves, and dropping it risks the rules vanishing at
+  compaction. Leave it, and revisit only if a real run shows compaction happening.
+
+The wall clock in a seshi conversation is the model, and the honest speed work was reliability:
+keepalive so nothing reconnects, sends that wait instead of failing, and a relay that refuses in
+constant work.
 
 ## Files
 
