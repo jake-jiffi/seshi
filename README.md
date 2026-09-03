@@ -104,7 +104,7 @@ production work, and the gaps below are honest.
 | 4 | Tier 3 worktrees and staged diffs | **done** |
 | 5 | Tier 4 | see the table above |
 
-270 tests. Typecheck clean. Node 24 runs the TypeScript directly, so there is no build step.
+362 tests. Typecheck clean. Node 24 runs the TypeScript directly, so there is no build step.
 Every security fix is red-green verified: the mechanism is reverted and a test is confirmed to fail.
 
 ### What a real run looks like
