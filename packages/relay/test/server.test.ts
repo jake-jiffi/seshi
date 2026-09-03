@@ -1,10 +1,21 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MBOX_TTL_MS, startRelay } from "../src/server.ts";
+import { fingerprint, generateIdentity, signBytes, type Identity } from "../../core/src/identity.ts";
 
-const FP_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const FP_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-const FP_C = "cccccccccccccccccccccccccccccccc";
+// Real identities, because a hello has to be signed now. The fingerprints are
+// derived exactly as the relay derives them, which one test below asserts.
+const ID_A = generateIdentity();
+const ID_B = generateIdentity();
+const ID_C = generateIdentity();
+const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
+const fpOf = (id: Identity) => fingerprint(id.sign.pub, id.seal.pub);
+const FP_A = fpOf(ID_A);
+const FP_B = fpOf(ID_B);
+const FP_C = fpOf(ID_C);
+const HELLO_DOMAIN = "seshi-hello-v1";
+const signHello = (nonce: string, id: Identity) =>
+  hex(signBytes(Buffer.concat([Buffer.from(HELLO_DOMAIN, "utf8"), Buffer.from(nonce, "hex")]), id.sign.priv));
 
 const MAX_FRAME = 256 * 1024;
 
@@ -17,6 +28,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  *  exercise the wire protocol rather than the server's own helpers. */
 class Client {
   readonly ws: WebSocket;
+  /** The nonce the relay greeted this connection with. */
+  nonce = "";
   private readonly inbox: Msg[] = [];
   private readonly waiters: Array<(m: Msg) => void> = [];
 
@@ -31,30 +44,41 @@ class Client {
     ws.addEventListener("error", () => {});
   }
 
-  static connect(port: number): Promise<Client> {
-    return new Promise((resolve, reject) => {
+  static async connect(port: number): Promise<Client> {
+    const client = await new Promise<Client>((resolve, reject) => {
       const ws = new WebSocket(`ws://127.0.0.1:${port}`);
-      const client = new Client(ws);
-      ws.addEventListener("open", () => resolve(client));
+      const c = new Client(ws);
+      ws.addEventListener("open", () => resolve(c));
       ws.addEventListener("error", () => reject(new Error("relay connect failed")));
     });
+    // Every connection is greeted with a challenge before anything else.
+    const greeting = await client.next();
+    assert.equal(greeting.t, "challenge", `expected a challenge, got ${JSON.stringify(greeting)}`);
+    client.nonce = String(greeting.nonce);
+    return client;
   }
 
   send(m: Msg): void {
     this.ws.send(JSON.stringify(m));
   }
 
-  hello(fp: string): void {
-    this.send({ t: "hello", fp });
+  /** A signed hello. Resolves with the fingerprint the relay derived, once it
+   *  has welcomed us, so the registration is complete before anyone routes. */
+  async helloAs(id: Identity): Promise<string> {
+    this.send({
+      t: "hello",
+      signPub: hex(id.sign.pub),
+      sealPub: hex(id.seal.pub),
+      sig: signHello(this.nonce, id),
+    });
+    const w = await this.next();
+    assert.equal(w.t, "welcome", `hello refused: ${JSON.stringify(w)}`);
+    return String(w.fp);
   }
 
-  /** hello is fire-and-forget, so this round-trips an unknown message off the
-   *  same socket to prove the server has processed the hello before another
-   *  client sends to this fingerprint. */
-  async register(fp: string): Promise<void> {
-    this.hello(fp);
-    this.send({ t: "__barrier__" });
-    assert.equal((await this.next()).t, "error");
+  /** A hello with whatever fields the caller wants, for attacking the handshake. */
+  helloRaw(fields: Msg): void {
+    this.send({ t: "hello", ...fields });
   }
 
   next(timeoutMs = 3000): Promise<Msg> {
@@ -106,8 +130,8 @@ test("routes a frame between two connected clients", async () => {
   await withRelay(async (port) => {
     const a = await Client.connect(port);
     const b = await Client.connect(port);
-    await a.register(FP_A);
-    await b.register(FP_B);
+    await a.helloAs(ID_A);
+    await b.helloAs(ID_B);
 
     a.send({ t: "send", to: FP_B, frame: b64("sealed-bytes") });
 
@@ -119,7 +143,7 @@ test("routes a frame between two connected clients", async () => {
 test("queues for an offline recipient and drains on reconnect", async () => {
   await withRelay(async (port) => {
     const a = await Client.connect(port);
-    a.hello(FP_A);
+    await a.helloAs(ID_A);
 
     a.send({ t: "send", to: FP_B, frame: b64("one") });
     a.send({ t: "send", to: FP_B, frame: b64("two") });
@@ -127,14 +151,14 @@ test("queues for an offline recipient and drains on reconnect", async () => {
     assert.deepEqual(await a.next(), { t: "queued" });
 
     const b = await Client.connect(port);
-    b.hello(FP_B);
+    await b.helloAs(ID_B);
 
     assert.deepEqual(await b.next(), { t: "deliver", from: FP_A, frame: b64("one") });
     assert.deepEqual(await b.next(), { t: "deliver", from: FP_A, frame: b64("two") });
 
     // the queue is emptied by the drain, not replayed on the next hello
     const b2 = await Client.connect(port);
-    b2.hello(FP_B);
+    await b2.helloAs(ID_B);
     await b2.expectSilence(150);
   });
 });
@@ -143,8 +167,8 @@ test("rejects a frame over 256 KB and delivers one of exactly 256 KB", async () 
   await withRelay(async (port) => {
     const a = await Client.connect(port);
     const b = await Client.connect(port);
-    await a.register(FP_A);
-    await b.register(FP_B);
+    await a.helloAs(ID_A);
+    await b.helloAs(ID_B);
 
     a.send({ t: "send", to: FP_B, frame: "A".repeat(MAX_FRAME + 1) });
     const err = await a.next();
@@ -164,9 +188,9 @@ test("does not deliver to the wrong fingerprint", async () => {
     const a = await Client.connect(port);
     const b = await Client.connect(port);
     const c = await Client.connect(port);
-    await a.register(FP_A);
-    await b.register(FP_B);
-    await c.register(FP_C);
+    await a.helloAs(ID_A);
+    await b.helloAs(ID_B);
+    await c.helloAs(ID_C);
 
     a.send({ t: "send", to: FP_B, frame: b64("for-b-only") });
 
@@ -179,8 +203,8 @@ test("stamps from off the connection and ignores a self-asserted from", async ()
   await withRelay(async (port) => {
     const a = await Client.connect(port);
     const b = await Client.connect(port);
-    await a.register(FP_A);
-    await b.register(FP_B);
+    await a.helloAs(ID_A);
+    await b.helloAs(ID_B);
 
     a.send({ t: "send", to: FP_B, frame: b64("x"), from: FP_C, fp: FP_C });
 
@@ -198,7 +222,7 @@ test("caps the per-recipient queue at 500 frames, dropping the oldest", async ()
     let overflow = 0;
     for (let s = 0; s < SENDERS; s++) {
       const a = await Client.connect(port);
-      a.hello(s.toString(16).padStart(32, "a"));
+      await a.helloAs(generateIdentity());
       for (let i = 0; i < EACH; i++) a.send({ t: "send", to: FP_B, frame: b64(`${s}:${i}`) });
       // Replies are read before the next sender starts, so queue order is fixed.
       const expected = EACH + Math.max(0, s * EACH + EACH - 500);
@@ -216,7 +240,7 @@ test("caps the per-recipient queue at 500 frames, dropping the oldest", async ()
     assert.equal(overflow, SENDERS * EACH - 500);
 
     const b = await Client.connect(port);
-    b.hello(FP_B);
+    await b.helloAs(ID_B);
 
     const got: string[] = [];
     for (let i = 0; i < 500; i++) {
@@ -237,13 +261,13 @@ test("refuses a send before hello and rejects malformed input", async () => {
     a.send({ t: "send", to: FP_B, frame: b64("early") });
     assert.equal((await a.next()).t, "error");
 
-    a.hello("NOT-A-FINGERPRINT");
+    a.helloRaw({ fp: "NOT-A-FINGERPRINT" });
     assert.equal((await a.next()).t, "error");
 
     a.ws.send("{not json");
     assert.equal((await a.next()).t, "error");
 
-    a.hello(FP_A);
+    await a.helloAs(ID_A);
     a.send({ t: "send", to: "zz", frame: b64("x") });
     assert.equal((await a.next()).t, "error");
 
@@ -476,7 +500,7 @@ test("a mailbox never reaches the envelope path", async () => {
   await withRelay(async (port) => {
     const a = await Client.connect(port);
     const b = await Client.connect(port);
-    await a.register(FP_A);
+    await a.helloAs(ID_A);
 
     b.send({ t: "mbox_put", id: MBOX_A, data: b64("a bundle nobody asked for") });
     assert.deepEqual(await b.next(), { t: "mbox_ok" });
@@ -501,10 +525,11 @@ const fpN = (n: number) => n.toString(16).padStart(32, "0");
 test("one sender cannot park more than MAX_QUEUED_PER_SENDER frames, however many recipients it names", async () => {
   await withRelay(async (port) => {
     const a = await Client.connect(port);
-    a.hello(FP_A);
+    await a.helloAs(ID_A);
     // One frame each to MAX+1 distinct offline recipients.
+    const R1 = generateIdentity();
     for (let i = 0; i < MAX_QUEUED_PER_SENDER + 1; i++) {
-      a.send({ t: "send", to: fpN(i + 1), frame: b64(`frame ${i}`) });
+      a.send({ t: "send", to: i === 0 ? fpOf(R1) : fpN(i + 1), frame: b64(`frame ${i}`) });
     }
     let queued = 0;
     let backlog = 0;
@@ -519,7 +544,7 @@ test("one sender cannot park more than MAX_QUEUED_PER_SENDER frames, however man
 
     // Draining one recipient hands that slot back to the sender.
     const r = await Client.connect(port);
-    r.hello(fpN(1));
+    await r.helloAs(R1);
     assert.equal((await r.next()).t, "deliver");
     a.send({ t: "send", to: fpN(999), frame: b64("after a drain") });
     assert.equal((await a.next()).t, "queued");
@@ -535,7 +560,7 @@ test("the relay refuses to hold more than MAX_QUEUED_BYTES across every sender",
     let full = 0;
     for (let s = 0; s < senders; s++) {
       const c = await Client.connect(port);
-      c.hello(fpN(0x1000 + s));
+      await c.helloAs(generateIdentity());
       let closed = false;
       c.ws.addEventListener("close", () => {
         closed = true;
@@ -562,7 +587,7 @@ test("a frame nobody collects is dropped after QUEUE_TTL_MS rather than held for
   const relay = await startRelay({ port: 0, now: () => clock });
   try {
     const a = await Client.connect(relay.port);
-    a.hello(FP_A);
+    await a.helloAs(ID_A);
     a.send({ t: "send", to: FP_B, frame: b64("stale") });
     assert.equal((await a.next()).t, "queued");
 
@@ -572,7 +597,7 @@ test("a frame nobody collects is dropped after QUEUE_TTL_MS rather than held for
     assert.equal((await a.next()).t, "queued");
 
     const b = await Client.connect(relay.port);
-    b.hello(FP_B);
+    await b.helloAs(ID_B);
     await b.expectSilence(150);
   } finally {
     await relay.close();
@@ -605,7 +630,7 @@ test("ping is answered with pong, before and after hello", async () => {
     const c = await Client.connect(port);
     c.send({ t: "ping" });
     assert.equal((await c.next()).t, "pong");
-    c.hello(FP_A);
+    await c.helloAs(ID_A);
     c.send({ t: "ping" });
     assert.equal((await c.next()).t, "pong");
   });
@@ -614,7 +639,7 @@ test("ping is answered with pong, before and after hello", async () => {
 test("a sender that keeps being refused is cut off rather than kept busy", async () => {
   await withRelay(async (port) => {
     const a = await Client.connect(port);
-    a.hello(FP_A);
+    await a.helloAs(ID_A);
     // Fill the sender's budget, then keep pushing.
     for (let i = 0; i < MAX_QUEUED_PER_SENDER + 40; i++) {
       a.send({ t: "send", to: fpN(0x5000 + i), frame: b64("x") });
@@ -667,5 +692,81 @@ test("one client address may hold a bounded number of connections", async () => 
     assert.equal(again.readyState, WsClient.OPEN, "a freed slot must be reusable");
     again.close();
     for (const ws of held) ws.close();
+  });
+});
+
+// ---- The handshake itself ---------------------------------------------------
+
+test("the fingerprint on the socket is derived from the keys, and matches core's derivation", async () => {
+  await withRelay(async (port) => {
+    const c = await Client.connect(port);
+    c.helloRaw({ fp: FP_B, signPub: hex(ID_A.sign.pub), sealPub: hex(ID_A.seal.pub), sig: signHello(c.nonce, ID_A) });
+    const w = await c.next();
+    assert.equal(w.t, "welcome");
+    assert.equal(w.fp, FP_A, "the relay must derive the fingerprint, not read it");
+
+    const b = await Client.connect(port);
+    await b.helloAs(ID_B);
+    b.send({ t: "send", to: FP_A, frame: b64("for a") });
+    assert.equal((await c.next()).t, "deliver");
+    b.send({ t: "send", to: FP_B, frame: b64("for b") });
+    assert.equal((await b.next()).t, "deliver");
+    await c.expectSilence(100);
+  });
+});
+
+test("a hello whose signature is over the wrong nonce is refused, and the socket stays unregistered", async () => {
+  await withRelay(async (port) => {
+    const c = await Client.connect(port);
+    c.helloRaw({ signPub: hex(ID_A.sign.pub), sealPub: hex(ID_A.seal.pub), sig: signHello("00".repeat(32), ID_A) });
+    const m = await c.next();
+    assert.equal(m.t, "error");
+    assert.match(String(m.msg), /signature/);
+    c.send({ t: "send", to: FP_B, frame: b64("x") });
+    assert.match(String((await c.next()).msg), /hello first/, "a refused hello must not register");
+  });
+});
+
+test("a captured hello cannot be replayed on a new connection", async () => {
+  await withRelay(async (port) => {
+    const first = await Client.connect(port);
+    const captured = { signPub: hex(ID_A.sign.pub), sealPub: hex(ID_A.seal.pub), sig: signHello(first.nonce, ID_A) };
+    first.helloRaw(captured);
+    assert.equal((await first.next()).t, "welcome");
+
+    const replayer = await Client.connect(port);
+    replayer.helloRaw(captured);
+    assert.equal((await replayer.next()).t, "error", "a different connection has a different nonce");
+
+    const b = await Client.connect(port);
+    await b.helloAs(ID_B);
+    b.send({ t: "send", to: FP_A, frame: b64("still yours") });
+    assert.equal((await first.next()).t, "deliver", "the real A must not have been kicked off");
+  });
+});
+
+test("a hello signed by one key but carrying another's sealing key gets a fingerprint nobody owns", async () => {
+  await withRelay(async (port) => {
+    const c = await Client.connect(port);
+    c.helloRaw({ signPub: hex(ID_A.sign.pub), sealPub: hex(ID_B.seal.pub), sig: signHello(c.nonce, ID_A) });
+    const w = await c.next();
+    assert.equal(w.t, "welcome");
+    assert.notEqual(w.fp, FP_A);
+    assert.notEqual(w.fp, FP_B);
+  });
+});
+
+test("a hello missing a field, or with a malformed key, is refused", async () => {
+  await withRelay(async (port) => {
+    const c = await Client.connect(port);
+    for (const bad of [
+      {},
+      { signPub: hex(ID_A.sign.pub) },
+      { signPub: "zz", sealPub: hex(ID_A.seal.pub), sig: signHello(c.nonce, ID_A) },
+      { signPub: hex(ID_A.sign.pub), sealPub: hex(ID_A.seal.pub), sig: "00" },
+    ]) {
+      c.helloRaw(bad);
+      assert.equal((await c.next()).t, "error", `accepted ${JSON.stringify(bad)}`);
+    }
   });
 });

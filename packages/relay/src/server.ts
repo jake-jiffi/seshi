@@ -6,6 +6,7 @@
 // The relay-sees-only-ciphertext shape is taken from agent-talk/retalk (MIT).
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
+import { createHash, createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
 
 /** Hard cap on one frame, enforced here rather than by convention (spec s4.2). */
 const MAX_FRAME_CHARS = 256 * 1024;
@@ -66,6 +67,46 @@ const MAX_REFUSALS = 20;
 export const MAX_CONNS_PER_IP = 32;
 
 const FINGERPRINT = /^[0-9a-f]{32}$/;
+
+// ---- Authenticated hello ------------------------------------------------------
+//
+// A fingerprint used to be a self-asserted routing label: anyone who had seen
+// an invite could hello as anyone, kick the real session off, swallow its
+// queued frames and spend its sender budget. Now the relay hands every new
+// connection a nonce, and a hello carries both public keys plus an Ed25519
+// signature over the nonce. The relay derives the fingerprint from the keys
+// itself, so the label on the socket is the label the signature proves.
+//
+// The two helpers below duplicate ten lines of packages/core on purpose. The
+// relay ships as a single directory with one dependency and must not reach
+// into the client's packages; a test asserts the derivation matches core.
+
+/** Domain-separated so a hello signature can never be mistaken for anything else. */
+const HELLO_DOMAIN = "seshi-hello-v1";
+const NONCE_BYTES = 32;
+const HEX_KEY = /^[0-9a-f]{64}$/;
+const HEX_SIG = /^[0-9a-f]{128}$/;
+/** RFC 8410 SPKI prefix for a raw 32-byte Ed25519 public key. */
+const ED25519_SPKI = Buffer.from("302a300506032b6570032100", "hex");
+
+/** sha256(signPub || sealPub), first 32 hex chars. Identical to core's `fingerprint`. */
+function fingerprintOf(signPub: Buffer, sealPub: Buffer): string {
+  return createHash("sha256").update(signPub).update(sealPub).digest("hex").slice(0, 32);
+}
+
+/** False, never a throw: a malformed key is a failed hello, not a crash. */
+function helloVerifies(nonce: Buffer, signPub: Buffer, sig: Buffer): boolean {
+  try {
+    const key = createPublicKey({
+      key: Buffer.concat([ED25519_SPKI, signPub]),
+      format: "der",
+      type: "spki",
+    });
+    return verifySignature(null, Buffer.concat([Buffer.from(HELLO_DOMAIN, "utf8"), nonce]), key, sig);
+  } catch {
+    return false;
+  }
+}
 
 // ---- Pairing mailboxes (spec s8) --------------------------------------------
 //
@@ -274,6 +315,8 @@ export async function startRelay(opts: {
     let misses = 0;
     let puts = 0;
     let refusals = 0;
+    // Fresh per connection, so a captured hello cannot be replayed on another.
+    const nonce = randomBytes(NONCE_BYTES);
 
     const reply = (m: unknown): void => {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(m));
@@ -288,6 +331,8 @@ export async function startRelay(opts: {
      */
     const fail = (msg: string, code?: string): void =>
       reply(code === undefined ? { t: "error", msg } : { t: "error", msg, code });
+
+    reply({ t: "challenge", nonce: nonce.toString("hex") });
 
     socket.on("message", (data) => {
       let parsed: unknown;
@@ -312,25 +357,39 @@ export async function startRelay(opts: {
       }
 
       if (m["t"] === "hello") {
-        // NOTE: hello is self-asserted. This prototype relay does not prove key
-        // possession, so a fingerprint is a routing label here, not an identity.
-        // Spec s4.2 wants authenticated endpoints; see the relay README task.
         if (fp !== null) {
           fail("already registered");
           return;
         }
-        const claimed = asString(m["fp"]);
-        if (claimed === null || !FINGERPRINT.test(claimed)) {
-          fail("bad fingerprint");
+        const signPubHex = asString(m["signPub"]);
+        const sealPubHex = asString(m["sealPub"]);
+        const sigHex = asString(m["sig"]);
+        if (
+          signPubHex === null || !HEX_KEY.test(signPubHex) ||
+          sealPubHex === null || !HEX_KEY.test(sealPubHex) ||
+          sigHex === null || !HEX_SIG.test(sigHex)
+        ) {
+          fail("hello must carry signPub, sealPub and a signature over the challenge");
           return;
         }
-        fp = claimed;
-        const previous = live.get(claimed);
+        const signPub = Buffer.from(signPubHex, "hex");
+        const sealPub = Buffer.from(sealPubHex, "hex");
+        if (!helloVerifies(nonce, signPub, Buffer.from(sigHex, "hex"))) {
+          // One message for a bad key and a bad signature alike.
+          fail("hello signature does not verify");
+          return;
+        }
+        // Derived, never read off the message. Whatever `fp` the client wrote
+        // is ignored, and the routing label is the one the signature proves.
+        const proven = fingerprintOf(signPub, sealPub);
+        fp = proven;
+        const previous = live.get(proven);
         // Set first: the replaced socket's close handler checks identity before
         // deleting, so it must not find itself still registered.
-        live.set(claimed, socket);
+        live.set(proven, socket);
         if (previous && previous !== socket) previous.close(4000, "replaced");
-        drain(claimed, socket);
+        reply({ t: "welcome", fp: proven });
+        drain(proven, socket);
         return;
       }
 

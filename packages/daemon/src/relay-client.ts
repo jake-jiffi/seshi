@@ -19,7 +19,7 @@
 // client does not have is an `npm install` the user does not have to run.
 import { capEnvelope, openEnvelope, sealEnvelope } from "../../core/src/envelope.ts";
 import type { Envelope } from "../../core/src/envelope.ts";
-import type { Identity } from "../../core/src/identity.ts";
+import { signBytes, type Identity } from "../../core/src/identity.ts";
 import type { Contact } from "./storage.ts";
 
 export type RelayClientOptions = {
@@ -53,6 +53,12 @@ const SEND_WAIT_MS = 15_000;
  */
 const KEEPALIVE_MS = 25_000;
 
+/** Must match the relay. The relay challenges, we sign `domain || nonce`. */
+const HELLO_DOMAIN = "seshi-hello-v1";
+
+/** A relay that never challenges, or never welcomes, is not one we are on. */
+const HANDSHAKE_MS = 10_000;
+
 export type RelayStatus = "connecting" | "open" | "closed";
 
 const hexToBytes = (s: string): Uint8Array => Uint8Array.from(Buffer.from(s, "hex"));
@@ -68,6 +74,10 @@ export class RelayClient {
   #pending: Promise<void> | null = null;
   /** Sends parked until the socket is open again. */
   readonly #openWaiters: Array<() => void> = [];
+  /** True between the relay's welcome and the socket closing. */
+  #registered = false;
+  /** The connect in progress, so the handshake messages can settle it. */
+  #handshake: { socket: WebSocket; resolve: () => void; reject: (e: Error) => void } | null = null;
 
   constructor(opts: RelayClientOptions) {
     this.#opts = opts;
@@ -80,8 +90,9 @@ export class RelayClient {
     return this.#fingerprint;
   }
 
+  /** Open AND registered: a socket that has not been welcomed cannot send. */
   get connected(): boolean {
-    return this.#socket !== null && this.#socket.readyState === WebSocket.OPEN;
+    return this.#registered && this.#socket !== null && this.#socket.readyState === WebSocket.OPEN;
   }
 
   connect(): Promise<void> {
@@ -99,13 +110,27 @@ export class RelayClient {
       socket.binaryType = "arraybuffer";
       this.#socket = socket;
 
-      socket.addEventListener("open", () => {
-        socket.send(JSON.stringify({ t: "hello", fp: this.#fingerprint }));
-        this.#startKeepalive(socket);
-        this.#opts.onStatus?.("open");
-        for (const release of this.#openWaiters.splice(0)) release();
-        resolve();
-      });
+      // The handshake is driven from #onMessage: the relay sends a challenge,
+      // we answer with a signed hello, and `welcome` is what resolves this.
+      const timer = setTimeout(() => {
+        if (this.#handshake?.socket === socket) {
+          this.#handshake = null;
+          socket.close();
+          reject(new Error(`the relay at ${this.#opts.url} did not complete the handshake`));
+        }
+      }, HANDSHAKE_MS);
+      timer.unref?.();
+      this.#handshake = {
+        socket,
+        resolve: () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      };
 
       socket.addEventListener("message", (event) => {
         const data: unknown = event.data;
@@ -116,6 +141,12 @@ export class RelayClient {
 
       socket.addEventListener("close", () => {
         if (this.#socket === socket) this.#socket = null;
+        this.#registered = false;
+        if (this.#handshake?.socket === socket) {
+          const h = this.#handshake;
+          this.#handshake = null;
+          h.reject(new Error(`the relay at ${this.#opts.url} closed during the handshake`));
+        }
         this.#stopKeepalive();
         this.#opts.onStatus?.("closed");
         this.#scheduleReconnect();
@@ -130,9 +161,11 @@ export class RelayClient {
       // that hides real failures, so the error is surfaced through onStatus and
       // the socket is left to its close handler.
       socket.addEventListener("error", (event) => {
-        if (!this.connected) {
+        if (this.#handshake?.socket === socket) {
           const cause: unknown = (event as { error?: unknown }).error;
-          reject(new Error(`could not reach the relay at ${this.#opts.url}`, { cause }));
+          const h = this.#handshake;
+          this.#handshake = null;
+          h.reject(new Error(`could not reach the relay at ${this.#opts.url}`, { cause }));
           return;
         }
         this.#opts.onStatus?.("closed");
@@ -234,6 +267,48 @@ export class RelayClient {
     }
     if (typeof parsed !== "object" || parsed === null) return;
     const m = parsed as Record<string, unknown>;
+
+    if (m["t"] === "challenge") {
+      const nonce = typeof m["nonce"] === "string" ? m["nonce"] : "";
+      const socket = this.#handshake?.socket ?? this.#socket;
+      if (socket === null || !/^[0-9a-f]{64}$/.test(nonce)) return;
+      const id = this.#opts.identity;
+      const sig = signBytes(
+        Buffer.concat([Buffer.from(HELLO_DOMAIN, "utf8"), Buffer.from(nonce, "hex")]),
+        id.sign.priv,
+      );
+      socket.send(
+        JSON.stringify({
+          t: "hello",
+          signPub: Buffer.from(id.sign.pub).toString("hex"),
+          sealPub: Buffer.from(id.seal.pub).toString("hex"),
+          sig: Buffer.from(sig).toString("hex"),
+        }),
+      );
+      return;
+    }
+
+    if (m["t"] === "welcome") {
+      const h = this.#handshake;
+      if (h === null) return;
+      this.#handshake = null;
+      this.#registered = true;
+      this.#startKeepalive(h.socket);
+      this.#opts.onStatus?.("open");
+      for (const release of this.#openWaiters.splice(0)) release();
+      h.resolve();
+      return;
+    }
+
+    if (m["t"] === "error" && this.#handshake !== null) {
+      // The relay refused our hello. Nothing else can be in flight yet.
+      const h = this.#handshake;
+      this.#handshake = null;
+      h.reject(new Error(`the relay refused the hello: ${String(m["msg"])}`));
+      h.socket.close();
+      return;
+    }
+
     if (m["t"] !== "deliver") return;
 
     const claimedFrom = typeof m["from"] === "string" ? m["from"] : "";

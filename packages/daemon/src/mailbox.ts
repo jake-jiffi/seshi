@@ -90,6 +90,9 @@ function attempt(url: string, message: unknown, timeoutMs: number): Promise<Atte
         finish(new Error("the relay answered with something that is not an object"));
         return;
       }
+      // Every connection is greeted with a challenge. Mailbox ops are the one
+      // path that never says hello, so the greeting is simply not our answer.
+      if ((parsed as Record<string, unknown>)["t"] === "challenge") return;
       finish(null, parsed as Record<string, unknown>);
     });
     socket.addEventListener("close", () => finish(new Error("the relay closed before answering")));

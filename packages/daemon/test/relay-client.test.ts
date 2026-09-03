@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { startRelay } from "../../relay/src/server.ts";
-import { generateIdentity, fingerprint } from "../../core/src/identity.ts";
+import { generateIdentity, fingerprint, signBytes } from "../../core/src/identity.ts";
 import type { Envelope } from "../../core/src/envelope.ts";
 import { RelayClient } from "../src/relay-client.ts";
 import type { Contact } from "../src/storage.ts";
@@ -215,9 +215,27 @@ test("a send during a dropped socket waits for the reconnect instead of failing"
 
   // Knock jake off the relay the way an idle proxy would, using the relay's
   // own rule that a fresh hello for a fingerprint closes the previous socket.
+  // The hello has to be signed with jake's key now, which is the point of the
+  // handshake: only jake can do this to jake.
   const squatter = new WebSocket(url);
-  await new Promise((r) => squatter.addEventListener("open", r));
-  squatter.send(JSON.stringify({ t: "hello", fp: jakeContact.fingerprint }));
+  const challenge = await new Promise<string>((r) =>
+    squatter.addEventListener("message", (ev) => {
+      const m = JSON.parse(String(ev.data)) as { t: string; nonce?: string };
+      if (m.t === "challenge") r(m.nonce ?? "");
+    }),
+  );
+  const sig = signBytes(
+    Buffer.concat([Buffer.from("seshi-hello-v1", "utf8"), Buffer.from(challenge, "hex")]),
+    jakeId.sign.priv,
+  );
+  squatter.send(
+    JSON.stringify({
+      t: "hello",
+      signPub: hex(jakeId.sign.pub),
+      sealPub: hex(jakeId.seal.pub),
+      sig: hex(sig),
+    }),
+  );
   await until(() => (jake.connected ? undefined : true));
   squatter.close();
 
@@ -232,11 +250,16 @@ test("the client pings while idle, so a proxy never sees an idle socket", async 
   const wss = new WebSocketServer({ port: 0 });
   await new Promise((r) => wss.once("listening", r));
   let pings = 0;
-  wss.on("connection", (s) =>
+  wss.on("connection", (s) => {
+    // Enough of the relay's handshake for the client to consider itself
+    // registered, which is the only state it pings from.
+    s.send(JSON.stringify({ t: "challenge", nonce: "00".repeat(32) }));
     s.on("message", (d) => {
-      if ((JSON.parse(String(d)) as { t?: string }).t === "ping") pings += 1;
-    }),
-  );
+      const t = (JSON.parse(String(d)) as { t?: string }).t;
+      if (t === "hello") s.send(JSON.stringify({ t: "welcome", fp: "0".repeat(32) }));
+      if (t === "ping") pings += 1;
+    });
+  });
   const port = (wss.address() as { port: number }).port;
   const c = new RelayClient({
     url: `ws://127.0.0.1:${port}`,
